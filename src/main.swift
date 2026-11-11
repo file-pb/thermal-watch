@@ -53,6 +53,29 @@ case "--chart":
     try png.write(to: URL(fileURLWithPath: out))
     print("graf: \(out)  (\(view.samples.count) vzorků, \(Int(mins)) min)")
 
+case "--test-alert":
+    // Ověření obou kanálů najednou: panel i ntfy, bez čekání na skutečný throttling.
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let alerter = Alerter()
+    let s = Sampler.sample(baseline: Store.baseline())
+    let shown = alerter.fireThrottleAlert(s)
+    print("panel: \(shown ? "zobrazen" : "potlačen (cooldown/ztlumeno)")")
+    print("ntfy: \(Config.load().remoteEnabled ? "odesláno na \(Config.load().ntfyServer)" : "nenakonfigurováno")")
+    print("stav: \(Report.statusLine(s))")
+    // Chvíli běž, ať se panel vykreslí a request odejde.
+    RunLoop.main.run(until: Date().addingTimeInterval(2))
+    print("panel na obrazovce: \(alerter.panelVisible)")
+    RunLoop.main.run(until: Date().addingTimeInterval(8))
+
+case "--config":
+    let c = Config.load()
+    print("config: \(Config.url.path)")
+    print("  ntfyTopic: \(c.ntfyTopic.isEmpty ? "(prázdné – vzdálený kanál vypnutý)" : c.ntfyTopic)")
+    print("  ntfyServer: \(c.ntfyServer)")
+    print("  panel: \(c.panel) · sound: \(c.sound) · cooldown: \(Int(c.cooldownSeconds)) s")
+    print("  alertOnModerate: \(c.alertOnModerate)")
+
 case "--help", "-h":
     print("""
     ThermalWatch — omezuje mě teplota Macu?
@@ -62,6 +85,8 @@ case "--help", "-h":
       thermalwatch --watch      průběžně v terminálu
       thermalwatch --report [m] retrospektiva za posledních m minut (výchozí 30)
       thermalwatch --chart f.png [m]  graf do PNG
+      thermalwatch --test-alert zkušební upozornění (panel + ntfy)
+      thermalwatch --config     vypíše nastavení a cestu ke config.json
 
     Data: \(Store.dir.path)
     """)

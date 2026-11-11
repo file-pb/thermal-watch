@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var baseline: UInt64 = 0
     private var samples: [Sample] = []
 
+    private let alerter = Alerter()
     private let chart = ChartView(frame: NSRect(x: 0, y: 0, width: 340, height: 118))
     private let headline = NSMenuItem(title: "…", action: nil, keyEquivalent: "")
     private let detail = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -21,6 +22,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activity: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        alerter.onEvent = { line in
+            let stamp = Report.ts.string(from: Date())
+            let data = Data("\(stamp)  \(line)\n".utf8)
+            let url = Store.dir.appendingPathComponent("alerts.log")
+            if let h = try? FileHandle(forWritingTo: url) {
+                defer { try? h.close() }
+                _ = try? h.seekToEnd()
+                try? h.write(contentsOf: data)
+            } else {
+                try? data.write(to: url)
+            }
+        }
         activity = ProcessInfo.processInfo.beginActivity(
             options: .userInitiated, reason: "thermal sampling")
         Store.trim()
@@ -47,6 +60,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 action: #selector(revealLog), keyEquivalent: "")
         reveal.target = self
         menu.addItem(reveal)
+        let test = NSMenuItem(title: "Zkusit upozornění",
+                              action: #selector(testAlert), keyEquivalent: "")
+        test.target = self
+        menu.addItem(test)
+        let conf = NSMenuItem(title: "Otevřít nastavení (config.json)",
+                              action: #selector(openConfig), keyEquivalent: "")
+        conf.target = self
+        menu.addItem(conf)
         let recal = NSMenuItem(title: "Překalibrovat 100 %",
                                action: #selector(recalibrate), keyEquivalent: "")
         recal.target = self
@@ -78,6 +99,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let cutoff = Date().timeIntervalSince1970 - 30 * 60
         samples.removeAll { $0.t < cutoff }
         render(s)
+        // Alert se rozhoduje z vyhlazené řady, ne z jednoho vzorku.
+        if let smoothed = Verdict.smoothSeries(samples).last { alerter.consider(smoothed) }
     }
 
     private func render(_ raw: Sample) {
@@ -97,9 +120,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         headline.title = Report.statusLine(s)
         detail.title = String(
-            format: "poslední měření %.0f µs → %.0f %% · 100 %% = %.0f µs · tepelný stav %@%@",
-            Double(raw.nanos) / 1000, raw.speedPct, Double(baseline) / 1000,
-            Verdict.thermalName(raw.thermal),
+            format: "tlak %@ · poslední měření %.0f µs → %.0f %% · 100 %% = %.0f µs%@",
+            Pressure.name(raw.pressure), Double(raw.nanos) / 1000, raw.speedPct,
+            Double(baseline) / 1000,
             raw.lowPower ? " · Low Power Mode" : "")
 
         chart.samples = smooth
@@ -125,6 +148,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func revealLog() {
         NSWorkspace.shared.selectFile(Store.logURL.path,
                                       inFileViewerRootedAtPath: Store.dir.path)
+    }
+
+    @objc private func testAlert() {
+        let base = baseline > 0 ? baseline : 1
+        alerter.reloadConfig()
+        alerter.fireThrottleAlert(Sampler.sample(baseline: base))
+    }
+
+    @objc private func openConfig() {
+        _ = Config.load() // vytvoří soubor, když ještě není
+        NSWorkspace.shared.selectFile(Config.url.path, inFileViewerRootedAtPath: Store.dir.path)
     }
 
     @objc private func recalibrate() {

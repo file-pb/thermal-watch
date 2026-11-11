@@ -13,8 +13,8 @@ struct Report {
         if s.lowPower { extra += " [low power]" }
         if !s.onAC { extra += " [baterie]" }
         return String(
-            format: "%@ %@ — %@ · rychlost %.0f %% · load %.2f%@",
-            mark, lvl.label, Verdict.cause(s), s.speedPct, s.load1, extra
+            format: "%@ %@ — %@ · tlak %@ · rychlost %.0f %% · load %.2f%@",
+            mark, lvl.label, Verdict.cause(s), Pressure.name(s.pressure), s.speedPct, s.load1, extra
         )
     }
 
@@ -63,8 +63,8 @@ struct Report {
             let m = String(ts.string(from: Date(timeIntervalSince1970: s.t)).prefix(5))
             if m == lastMinute { continue }
             lastMinute = m
-            flagged.append(String(format: "  %@  %.0f %%  thermal %@  load %.1f",
-                                  m, s.speedPct, Verdict.thermalName(s.thermal), s.load1))
+            flagged.append(String(format: "  %@  %.0f %%  tlak %@  load %.1f",
+                                  m, s.speedPct, Pressure.name(s.pressure), s.load1))
         }
         if !flagged.isEmpty {
             lines.append("minuty s omezením:")

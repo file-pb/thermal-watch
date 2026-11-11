@@ -102,7 +102,7 @@ final class ChartView: NSView {
 
         // pás tepelného stavu
         for s in samples {
-            guard let lvl = Verdict.thermalTick(s.thermal) else { continue }
+            guard let lvl = Verdict.pressureTick(s.pressure) else { continue }
             let x = xFor(s.t)
             let r = NSRect(x: x, y: inset.minY - 8, width: 2, height: 5)
             ChartView.colors[lvl.rawValue].withAlphaComponent(0.85).setFill()

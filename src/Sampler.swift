@@ -4,7 +4,12 @@ import IOKit.ps
 /// Jeden odečet stavu stroje.
 struct Sample: Codable {
     let t: Double        // unix epoch (s)
-    let thermal: Int     // ProcessInfo.ThermalState.rawValue: 0 nominal, 1 fair, 2 serious, 3 critical
+    /// Darwin thermal pressure level 0..4 (Nominal/Moderate/Heavy/Trapping/Sleeping).
+    /// Hlavní signál. Volitelné kvůli záznamům z verze, která ho ještě neměla.
+    let pressure: Int?
+    /// ProcessInfo.ThermalState.rawValue – jen pro doložení rozdílu, verdikt na něm
+    /// nestojí: slévá Moderate a Heavy do `fair`.
+    let thermal: Int
     let speedPct: Double // efektivní rychlost jednoho výkonného jádra vůči kalibrovanému maximu
     let nanos: UInt64    // nejlepší čas referenční smyčky v tomto vzorku
     let load1: Double    // 1min load average
@@ -13,7 +18,7 @@ struct Sample: Codable {
 }
 
 /// Úroveň omezení: 0 = OK, 1 = mírné, 2 = throttling.
-enum Level: Int {
+enum Severity: Int {
     case ok = 0, mild = 1, throttling = 2
 
     var label: String {
@@ -26,28 +31,23 @@ enum Level: Int {
 }
 
 enum Verdict {
-    /// Tepelný tlak podle systému (ProcessInfo.thermalState).
-    /// `fair` = jen zvýšená teplota, výkon ještě omezený není → OK.
-    /// `serious` = Apple: „system performance may be reduced“ → throttling.
-    static func thermalLevel(_ raw: Int) -> Level {
-        switch raw {
-        case 0, 1: return .ok       // nominal, fair
-        default: return .throttling // serious, critical
-        }
+    /// Tepelný tlak z notify klíče. Heavy a výš = systém reálně omezuje výkon.
+    static func pressureLevel(_ p: Int?) -> Severity {
+        guard let p else { return .ok }
+        if p >= Pressure.heavy { return .throttling }
+        if p == Pressure.moderate { return .mild }
+        return .ok
     }
 
-    /// Jen pro pás v grafu: i `fair` je vidět jako náznak.
-    static func thermalTick(_ raw: Int) -> Level? {
-        switch raw {
-        case 0: return nil
-        case 1: return .mild
-        default: return .throttling
-        }
+    /// Pás v grafu: Moderate je vidět jako náznak, Heavy a výš jako omezení.
+    static func pressureTick(_ p: Int?) -> Severity? {
+        guard let p, p > 0 else { return nil }
+        return p >= Pressure.heavy ? .throttling : .mild
     }
 
     /// Měřená rychlost. Hranice jsou volnější než by se zdálo, protože i na
     /// nezatíženém stroji se minimum z dávek rozptyluje o ~10 %.
-    static func speedLevel(_ pct: Double) -> Level {
+    static func speedLevel(_ pct: Double) -> Severity {
         if pct >= 85 { return .ok }
         if pct >= 70 { return .mild }
         return .throttling
@@ -56,10 +56,10 @@ enum Verdict {
     /// Load, od kterého je pokles rychlosti vysvětlitelný soupeřením o jádra.
     static let busyLoad = 3.0
 
-    static func overall(_ s: Sample) -> Level {
-        let a = thermalLevel(s.thermal).rawValue
+    static func overall(_ s: Sample) -> Severity {
+        let a = pressureLevel(s.pressure).rawValue
         let b = speedLevel(s.speedPct).rawValue
-        return Level(rawValue: max(a, b)) ?? .ok
+        return Severity(rawValue: max(a, b)) ?? .ok
     }
 
     /// Jedno měření je šumové: i na nezatíženém stroji se minimum z dávek rozptyluje
@@ -76,23 +76,32 @@ enum Verdict {
         for (i, s) in samples.enumerated() {
             var pct = s.speedPct
             var thermal = s.thermal
+            // Tepelný tlak se nevyhlazuje směrem dolů: bere se nejhorší z okna,
+            // protože Heavy je fakt od systému, ne odhad zatížený šumem.
+            var pressure = s.pressure
             var j = i - 1
             var used = 0
             while j >= 0, used < smoothMax - 1, s.t - samples[j].t <= smoothWindow {
                 pct = max(pct, samples[j].speedPct)
                 thermal = max(thermal, samples[j].thermal)
+                if let q = samples[j].pressure { pressure = max(pressure ?? 0, q) }
                 j -= 1; used += 1
             }
-            out.append(Sample(t: s.t, thermal: thermal, speedPct: pct, nanos: s.nanos,
-                              load1: s.load1, lowPower: s.lowPower, onAC: s.onAC))
+            out.append(Sample(t: s.t, pressure: pressure, thermal: thermal, speedPct: pct,
+                              nanos: s.nanos, load1: s.load1, lowPower: s.lowPower, onAC: s.onAC))
         }
         return out
     }
 
     /// Příčina – to je ta odpověď, kterou uživatel chce: teplo, nebo zátěž?
     static func cause(_ s: Sample) -> String {
-        if thermalLevel(s.thermal) == .throttling {
-            return "teplo (systém hlásí \(thermalName(s.thermal)))"
+        switch pressureLevel(s.pressure) {
+        case .throttling:
+            return "teplo – systém je na \(Pressure.name(s.pressure))"
+        case .mild:
+            return "teplo stoupá (\(Pressure.name(s.pressure)))"
+        case .ok:
+            break
         }
         if speedLevel(s.speedPct) != .ok {
             if s.lowPower { return "Low Power Mode, ne teplo" }
@@ -101,7 +110,7 @@ enum Verdict {
             }
             return "pokles rychlosti bez tepelného tlaku"
         }
-        return s.thermal == 1 ? "teplo zvýšené, výkon ještě ne" : "bez omezení"
+        return "bez omezení"
     }
 
     static func thermalName(_ raw: Int) -> String {
@@ -205,6 +214,7 @@ struct Sampler {
         let pct = baseline > 0 ? (Double(baseline) / Double(n)) * 100.0 : 100.0
         return Sample(
             t: Date().timeIntervalSince1970,
+            pressure: Pressure.level(),
             thermal: ProcessInfo.processInfo.thermalState.rawValue,
             speedPct: min(pct, 150),
             nanos: n,
