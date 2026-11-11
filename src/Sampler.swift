@@ -1,6 +1,12 @@
 import Foundation
 import IOKit.ps
 
+/// Proces, který v okamžiku zpomalení patřil mezi nejžravější.
+struct TopProc: Codable {
+    let n: String
+    let c: Double
+}
+
 /// Jeden odečet stavu stroje.
 struct Sample: Codable {
     let t: Double        // unix epoch (s)
@@ -10,11 +16,21 @@ struct Sample: Codable {
     /// ProcessInfo.ThermalState.rawValue – jen pro doložení rozdílu, verdikt na něm
     /// nestojí: slévá Moderate a Heavy do `fair`.
     let thermal: Int
-    let speedPct: Double // efektivní rychlost jednoho výkonného jádra vůči kalibrovanému maximu
-    let nanos: UInt64    // nejlepší čas referenční smyčky v tomto vzorku
+    /// Efektivní rychlost jednoho výkonného jádra vůči referenci. `nil` znamená,
+    /// že se neměřilo – na nečinném stroji nemá co zpomalovat a měření by jen
+    /// topilo (viz `Sampler.shouldMeasureSpeed`).
+    let speedPct: Double?
+    let nanos: UInt64?   // nejlepší čas referenční smyčky, když se měřilo
     let load1: Double    // 1min load average
     let lowPower: Bool   // Low Power Mode
     let onAC: Bool       // na napájení ze sítě
+    /// Měřeno z agenta na pozadí (true) nebo z jednorázového CLI běhu (false).
+    /// Dvě různé podmínky: CLI proces měří rychleji, protože jádro je po startu
+    /// rozjeté. Míchat je dohromady znamená porovnávat nesrovnatelné.
+    let gui: Bool?
+    /// Tři nejžravější procesy – ukládají se jen u zpomalených vzorků, aby šlo
+    /// zpětně říct, co stroj zdržovalo. Volitelné: u stavu OK chybí schválně.
+    let top: [TopProc]?
 }
 
 /// Úroveň omezení: 0 = OK, 1 = mírné, 2 = throttling.
@@ -45,9 +61,9 @@ enum Verdict {
         return p >= Pressure.heavy ? .throttling : .mild
     }
 
-    /// Měřená rychlost. Hranice jsou volnější než by se zdálo, protože i na
-    /// nezatíženém stroji se minimum z dávek rozptyluje o ~10 %.
-    static func speedLevel(_ pct: Double) -> Severity {
+    /// Měřená rychlost. `nil` = neměřeno, tedy žádný důvod k poplachu.
+    static func speedLevel(_ pct: Double?) -> Severity {
+        guard let pct else { return .ok }
         if pct >= 85 { return .ok }
         if pct >= 70 { return .mild }
         return .throttling
@@ -56,10 +72,14 @@ enum Verdict {
     /// Load, od kterého je pokles rychlosti vysvětlitelný soupeřením o jádra.
     static let busyLoad = 3.0
 
+    /// Tepelný tlak je fakt od systému, měřená rychlost je odhad citlivý na souboj
+    /// o jádra. Proto rychlost sama o sobě nikdy nedá červenou: bez tepelného tlaku
+    /// se zastropuje na „mírné“. Červená znamená, že systém opravdu omezuje výkon.
     static func overall(_ s: Sample) -> Severity {
-        let a = pressureLevel(s.pressure).rawValue
-        let b = speedLevel(s.speedPct).rawValue
-        return Severity(rawValue: max(a, b)) ?? .ok
+        let p = pressureLevel(s.pressure)
+        var v = speedLevel(s.speedPct)
+        if v == .throttling, p == .ok { v = .mild }
+        return Severity(rawValue: max(p.rawValue, v.rawValue)) ?? .ok
     }
 
     /// Jedno měření je šumové: i na nezatíženém stroji se minimum z dávek rozptyluje
@@ -82,35 +102,50 @@ enum Verdict {
             var j = i - 1
             var used = 0
             while j >= 0, used < smoothMax - 1, s.t - samples[j].t <= smoothWindow {
-                pct = max(pct, samples[j].speedPct)
+                if let q = samples[j].speedPct { pct = pct.map { max($0, q) } ?? q }
                 thermal = max(thermal, samples[j].thermal)
                 if let q = samples[j].pressure { pressure = max(pressure ?? 0, q) }
                 j -= 1; used += 1
             }
             out.append(Sample(t: s.t, pressure: pressure, thermal: thermal, speedPct: pct,
-                              nanos: s.nanos, load1: s.load1, lowPower: s.lowPower, onAC: s.onAC))
+                              nanos: s.nanos, load1: s.load1, lowPower: s.lowPower,
+                              onAC: s.onAC, gui: s.gui, top: s.top))
         }
         return out
     }
 
     /// Příčina – to je ta odpověď, kterou uživatel chce: teplo, nebo zátěž?
-    static func cause(_ s: Sample) -> String {
+    enum CauseKind: String, Codable {
+        case heat, load, lowPower, other, none
+    }
+
+    /// Co verdikt vytáhlo nahoru. Jeden zdroj pravdy pro text i pro statistiku.
+    static func causeKind(_ s: Sample) -> CauseKind {
         let p = pressureLevel(s.pressure)
         let v = speedLevel(s.speedPct)
-        let name = Pressure.name(s.pressure)
-        // Pojmenovat se musí ten faktor, který verdikt skutečně vytáhl nahoru,
-        // jinak hlásí „teplo stoupá“ u červeného stavu způsobeného rychlostí.
-        if p.rawValue >= v.rawValue, p != .ok {
-            return p == .throttling ? "teplo – systém je na \(name)" : "teplo stoupá (\(name))"
-        }
+        if p.rawValue >= v.rawValue, p != .ok { return .heat }
         if v != .ok {
-            if s.lowPower { return "Low Power Mode, ne teplo" }
-            if s.load1 >= busyLoad {
-                return String(format: "zátěž CPU (load %.1f), tlak %@", s.load1, name)
-            }
-            return "pokles rychlosti, tlak jen \(name)"
+            if s.lowPower { return .lowPower }
+            return s.load1 >= busyLoad ? .load : .other
         }
-        return "bez omezení"
+        return .none
+    }
+
+    static func cause(_ s: Sample) -> String {
+        let name = Pressure.name(s.pressure)
+        switch causeKind(s) {
+        case .heat:
+            return pressureLevel(s.pressure) == .throttling
+                ? "teplo – systém je na \(name)" : "teplo stoupá (\(name))"
+        case .load:
+            return String(format: "zátěž CPU (load %.1f), tlak %@", s.load1, name)
+        case .lowPower:
+            return "Low Power Mode, ne teplo"
+        case .other:
+            return "pokles rychlosti, tlak jen \(name)"
+        case .none:
+            return "bez omezení"
+        }
     }
 
     static func thermalName(_ raw: Int) -> String {
@@ -145,7 +180,7 @@ func referenceWork(_ n: Int, _ seed: Double) -> Double {
 }
 
 struct Sampler {
-    /// Počet iterací referenční smyčky. ~390 µs na M5 P-jádru při plné frekvenci.
+    /// Počet iterací referenční smyčky. ~345 µs na M5 P-jádru při plné frekvenci.
     static let iterations = 300_000
     /// Počet měřených dávek na jeden vzorek; bere se minimum (odolné proti preempci).
     static let bursts = 10
@@ -153,9 +188,12 @@ struct Sampler {
     /// 5 s spí a pak 4 ms počítá, dostane na Apple Silicon nízkou frekvenci, protože
     /// DVFS se rozhoduje podle historie využití dané thread group. Naměřeno na M5
     /// (dvě série, interval 5 s): warmup 0,8 ms → 640/622 µs, 4 ms → 628/616 µs,
-    /// 10 ms → 393/396 µs, 80 ms → 396/380 µs. Pod 10 ms měření neukazuje throttling,
-    /// ale vlastní rozjezd. 30 dávek ≈ 12 ms.
-    static let warmups = 30
+    /// 10 ms → 393/396 µs. Na **nečinném** stroji je ale potřeba ještě mnohem víc:
+    /// 12 ms → 691/561/614 µs, 24 ms → 533/545/544 µs, 48 ms → 410/359/411 µs,
+    /// 100 ms → 344/343/343 µs. Takt se tedy plně rozjede až po ~100 ms souvislé
+    /// práce. S kratším warmupem hlásil nečinný zdravý stroj „60 %“, což byla
+    /// měřicí chyba, ne throttling. 250 dávek ≈ 100 ms.
+    static let warmups = 250
 
     private static func burstNanos() -> UInt64 {
         let t0 = DispatchTime.now().uptimeNanoseconds
@@ -208,19 +246,59 @@ struct Sampler {
         return true
     }
 
-    /// Jeden vzorek. `baseline` je kalibrované minimum (ns) = 100 %.
-    static func sample(baseline: UInt64) -> Sample {
-        let n = bestNanos()
-        let pct = baseline > 0 ? (Double(baseline) / Double(n)) * 100.0 : 100.0
+    /// Jedno měření rychlosti stojí ~104 ms práce jednoho jádra (warmup 250 dávek
+    /// + 10 měřených, viz `warmups`/`bursts`). Proto se nedělá při každém vzorku:
+    /// jednou za minutu to vyjde na 0,17 % jednoho jádra, tedy 0,017 % stroje.
+    /// Když je horko, zahušťuje se na 20 s (0,5 % jádra), protože tehdy je to číslo
+    /// k něčemu. Tepelný tlak se čte pořád, ten je zadarmo – jedno `notify_get_state`.
+    static let speedIntervalIdle: TimeInterval = 60
+    static let speedIntervalHot: TimeInterval = 20
+    private static var lastSpeedAt: Date?
+
+    /// Nejkratší odstup mezi dvěma spuštěními `ps` (~15 ms CPU na běh).
+    static let topInterval: TimeInterval = 30
+    private static var lastTopAt: Date?
+    /// Nastaví aplikace na pozadí; CLI ho nechává na false.
+    static var isGUI = false
+
+    /// Jeden vzorek. `reference` je čas odpovídající 100 % (viz `Store.reference()`).
+    static func sample(baseline reference: UInt64, force: Bool = false) -> Sample {
+        let pressure = Pressure.level()
+        let load = loadAvg1()
+
+        var n: UInt64?
+        var pct: Double?
+        let hot = Verdict.pressureLevel(pressure) != .ok || load >= 4
+        let interval = hot ? speedIntervalHot : speedIntervalIdle
+        let due = lastSpeedAt == nil || Date().timeIntervalSince(lastSpeedAt!) >= interval
+        if force || due {
+            lastSpeedAt = Date()
+            let m = bestNanos()
+            n = m
+            pct = min(reference > 0 ? (Double(reference) / Double(m)) * 100.0 : 100.0, 150)
+        }
+
+        // Viníky zjišťuj jen když je horko – na otázku „co mi hřeje stroj“
+        // odpovídá tepelný tlak, ne každý výkyv rychlosti.
+        var top: [TopProc]?
+        let hotEnough = Verdict.pressureLevel(pressure) != .ok
+        if hotEnough, lastTopAt == nil || Date().timeIntervalSince(lastTopAt!) >= topInterval {
+            lastTopAt = Date()
+            let procs = Pressure.topProcesses(3)
+            if !procs.isEmpty { top = procs.map { TopProc(n: $0.name, c: $0.cpu) } }
+        }
+
         return Sample(
             t: Date().timeIntervalSince1970,
-            pressure: Pressure.level(),
+            pressure: pressure,
             thermal: ProcessInfo.processInfo.thermalState.rawValue,
-            speedPct: min(pct, 150),
+            speedPct: pct,
             nanos: n,
-            load1: loadAvg1(),
+            load1: load,
             lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled,
-            onAC: onACPower()
+            onAC: onACPower(),
+            gui: isGUI,
+            top: top
         )
     }
 }

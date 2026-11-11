@@ -63,8 +63,8 @@ final class Alerter {
             ? "Žádný proces nevyčnívá."
             : "Nejvíc žere: " + top.map { String(format: "%@ %.0f %%", $0.name, $0.cpu) }
                                    .joined(separator: ", ")
-        let headline = String(
-            format: "Tepelný tlak %@ · rychlost %.0f %%", Pressure.name(s.pressure), s.speedPct)
+        let speed = s.speedPct.map { String(format: " · rychlost %.0f %%", $0) } ?? ""
+        let headline = "Tepelný tlak \(Pressure.name(s.pressure))\(speed)"
         let body = "\(headline)\n\(Verdict.cause(s))\n\(topText)"
 
         if config.panel {
@@ -80,10 +80,16 @@ final class Alerter {
         panel?.close()
         panel = nil
         guard lastAlertAt != nil else { return }
-        let body = String(format: "Tepelný tlak %@ · rychlost zpět na %.0f %%",
-                          Pressure.name(s.pressure), s.speedPct)
+        let speed = s.speedPct.map { String(format: " · rychlost zpět na %.0f %%", $0) } ?? ""
+        let body = "Tepelný tlak \(Pressure.name(s.pressure))\(speed)"
         sendRemote(body: "✅ Zpátky na plném výkonu\n\(body)", priority: "low", tags: "white_check_mark")
         onEvent?("NÁVRAT · \(body)")
+    }
+
+    /// Ukáže informační panel bez vazby na stav automatu (položka z menu).
+    func showInfo(title: String, body: String) {
+        let lvl = Verdict.pressureLevel(Pressure.level())
+        showPanel(title: title, body: body, severity: lvl)
     }
 
     // MARK: - lokální panel
@@ -143,7 +149,7 @@ final class AlertPanel: NSPanel {
 
     init(title: String, body: String, severity: Severity, onSnooze: @escaping () -> Void) {
         self.onSnooze = onSnooze
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 420, height: 170),
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 460, height: 260),
                    styleMask: [.titled, .closable, .nonactivatingPanel, .utilityWindow],
                    backing: .buffered, defer: false)
         self.title = "ThermalWatch"
@@ -155,7 +161,7 @@ final class AlertPanel: NSPanel {
 
         // Bez `wantsLayer`: layer-backed strom se nedá vykreslit přes cacheDisplay,
         // což by rozbilo snímek panelu v `--test-alert`.
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 170))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 260))
 
         let stripe = StripeView(frame: NSRect(x: 0, y: 0, width: 6, height: root.bounds.height))
         stripe.color = ChartView.colors[severity.rawValue]
@@ -164,23 +170,23 @@ final class AlertPanel: NSPanel {
 
         let head = NSTextField(labelWithString: title)
         head.font = .systemFont(ofSize: 15, weight: .semibold)
-        head.frame = NSRect(x: 20, y: root.bounds.height - 38, width: 380, height: 22)
+        head.frame = NSRect(x: 20, y: root.bounds.height - 38, width: 420, height: 22)
         root.addSubview(head)
 
         let text = NSTextField(wrappingLabelWithString: body)
-        text.font = .systemFont(ofSize: 12)
+        text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         text.textColor = .secondaryLabelColor
-        text.frame = NSRect(x: 20, y: 46, width: 384, height: root.bounds.height - 92)
+        text.frame = NSRect(x: 20, y: 46, width: 424, height: root.bounds.height - 92)
         root.addSubview(text)
 
         let ok = NSButton(title: "Rozumím", target: self, action: #selector(dismiss))
         ok.bezelStyle = .rounded
-        ok.frame = NSRect(x: 310, y: 12, width: 94, height: 26)
+        ok.frame = NSRect(x: 350, y: 12, width: 94, height: 26)
         root.addSubview(ok)
 
         let snooze = NSButton(title: "Ztlumit na hodinu", target: self, action: #selector(snooze))
         snooze.bezelStyle = .rounded
-        snooze.frame = NSRect(x: 160, y: 12, width: 146, height: 26)
+        snooze.frame = NSRect(x: 200, y: 12, width: 146, height: 26)
         root.addSubview(snooze)
 
         contentView = root

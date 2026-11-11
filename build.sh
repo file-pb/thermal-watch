@@ -9,7 +9,7 @@ mkdir -p build "$APP/Contents/MacOS"
 # -import-objc-header: notify(3) není v Darwin modulu, přes hlavičku se dotáhne.
 swiftc -O -import-objc-header src/shim.h -o build/thermalwatch \
   src/Pressure.swift src/Config.swift src/Sampler.swift src/Store.swift src/Report.swift \
-  src/ChartView.swift src/Alerter.swift src/App.swift src/main.swift
+  src/ChartView.swift src/Stats.swift src/Alerter.swift src/App.swift src/main.swift
 
 cp build/thermalwatch "$APP/Contents/MacOS/ThermalWatch"
 cp resources/Info.plist "$APP/Contents/Info.plist"

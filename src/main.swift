@@ -4,9 +4,8 @@ import Foundation
 let args = Array(CommandLine.arguments.dropFirst())
 
 func printOnce() {
-    let base = Store.baseline()
-    let s = Sampler.sample(baseline: base)
-    if s.nanos < base { Store.saveBaseline(s.nanos) }
+    // Z CLI se měří vždycky: uživatel se ptá teď a sám.
+    let s = Sampler.sample(baseline: Store.reference(), force: true)
     Store.append(s)
     // verdikt z okna, ne z jednoho vzorku (Verdict.smoothSeries)
     let w = Verdict.smoothSeries(Store.recent(minutes: 2))
@@ -22,11 +21,9 @@ case "--report":
     print(Report.retrospective(minutes: m))
 
 case "--watch":
-    let base = Store.baseline()
-    var b = base
+    let b = Store.reference()
     while true {
-        let s = Sampler.sample(baseline: b)
-        if s.nanos < b { b = s.nanos; Store.saveBaseline(b) }
+        let s = Sampler.sample(baseline: b, force: true)
         Store.append(s)
         let hist = Verdict.smoothSeries(Store.recent(minutes: 30))
         print("\u{1B}[2J\u{1B}[H", terminator: "")
@@ -58,7 +55,7 @@ case "--test-alert":
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     let alerter = Alerter()
-    let s = Sampler.sample(baseline: Store.baseline())
+    let s = Sampler.sample(baseline: Store.reference(), force: true)
     let shown = alerter.fireThrottleAlert(s)
     print("panel: \(shown ? "zobrazen" : "potlačen (cooldown/ztlumeno)")")
     print("ntfy: \(Config.load().remoteEnabled ? "odesláno na \(Config.load().ntfyServer)" : "nenakonfigurováno")")
@@ -67,6 +64,13 @@ case "--test-alert":
     RunLoop.main.run(until: Date().addingTimeInterval(2))
     print("panel na obrazovce: \(alerter.panelVisible)")
     RunLoop.main.run(until: Date().addingTimeInterval(8))
+
+case "--stats":
+    Stats.catchUp()
+    print(Stats.report(days: Double(args.count > 1 ? args[1] : "7") ?? 7))
+
+case "--who":
+    print(Pressure.whoIsHeating())
 
 case "--config":
     let c = Config.load()
@@ -86,6 +90,8 @@ case "--help", "-h":
       thermalwatch --report [m] retrospektiva za posledních m minut (výchozí 30)
       thermalwatch --chart f.png [m]  graf do PNG
       thermalwatch --test-alert zkušební upozornění (panel + ntfy)
+      thermalwatch --who        co ti právě teď hřeje stroj
+      thermalwatch --stats [d]  rozpad: co tě za posledních d dní nejvíc zpomalovalo
       thermalwatch --config     vypíše nastavení a cestu ke config.json
 
     Data: \(Store.dir.path)

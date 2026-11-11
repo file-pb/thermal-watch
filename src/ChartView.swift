@@ -49,7 +49,7 @@ final class ChartView: NSView {
                 withAttributes: [.font: font, .foregroundColor: labelColor])
         }
 
-        guard samples.count >= 2 else {
+        guard samples.compactMap(\.speedPct).count >= 2 else {
             ("sbírám data…" as NSString).draw(
                 at: NSPoint(x: inset.midX - 32, y: inset.midY),
                 withAttributes: [.font: NSFont.systemFont(ofSize: 11),
@@ -70,6 +70,11 @@ final class ChartView: NSView {
         var runs: [[Sample]] = []
         var run: [Sample] = []
         for s in samples {
+            // Neměřený vzorek řadu přeruší – kreslit se dá jen to, co se změřilo.
+            guard s.speedPct != nil else {
+                if !run.isEmpty { runs.append(run); run = [] }
+                continue
+            }
             if let last = run.last, s.t - last.t > maxGap { runs.append(run); run = [] }
             run.append(s)
         }
@@ -79,7 +84,7 @@ final class ChartView: NSView {
             // plocha pod křivkou
             let area = NSBezierPath()
             area.move(to: NSPoint(x: xFor(r[0].t), y: inset.minY))
-            for s in r { area.line(to: NSPoint(x: xFor(s.t), y: yFor(s.speedPct))) }
+            for s in r { area.line(to: NSPoint(x: xFor(s.t), y: yFor(s.speedPct ?? 100))) }
             area.line(to: NSPoint(x: xFor(r.last!.t), y: inset.minY))
             area.close()
             // Výplň je neutrální schválně: barvu stavu nese křivka, obarvit celou
@@ -91,8 +96,8 @@ final class ChartView: NSView {
             for i in 1..<r.count {
                 let a = r[i - 1], b = r[i]
                 let seg = NSBezierPath()
-                seg.move(to: NSPoint(x: xFor(a.t), y: yFor(a.speedPct)))
-                seg.line(to: NSPoint(x: xFor(b.t), y: yFor(b.speedPct)))
+                seg.move(to: NSPoint(x: xFor(a.t), y: yFor(a.speedPct ?? 100)))
+                seg.line(to: NSPoint(x: xFor(b.t), y: yFor(b.speedPct ?? 100)))
                 seg.lineWidth = 1.5
                 ChartView.colors[max(Verdict.overall(a).rawValue,
                                      Verdict.overall(b).rawValue)].setStroke()

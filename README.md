@@ -1,27 +1,28 @@
 # ThermalWatch
 
-Upozorní tě, **když tě Mac začne zpomalovat teplem** — i když se na nic nedíváš,
-pracuješ na celou obrazovku nebo jsi u telefonu. Bez `sudo`, bez účtu, bez
-závislostí nad rámec Command Line Tools.
+Hlídá, jestli tě **přehřátý Mac nezpomaluje při práci**, a když ano, řekne ti
+rovnou **co ho hřeje**, ať to můžeš zavřít. Bez `sudo`, bez účtu, bez volání
+jakéhokoli modelu — je to obyčejný Swift binárník, takže nespotřebovává žádné
+kredity. Jediné síťové volání v celém kódu je volitelný POST na ntfy při alertu
+(`src/Alerter.swift`, `sendRemote`).
 
-Primární výstup je alert, ne dashboard. Menu bar a graf jsou doplněk pro
-retrospektivu („ve 14:32 to stálo — co bylo tehdy?“).
+V liště je to tichá tečka s procentem. Hlasité je to jen tehdy, když systém
+opravdu omezuje výkon.
 
-## Co alert umí
+## Co to stojí
 
-* **Plovoucí okno**, které je vidět i nad aplikací na celou obrazovku — vybral
-  jsem ho proto, že `display notification` se při Focusu a ve full-screenu schová
-  do Centra oznámení, tedy přesně tehdy, kdy se vibecoduje. Panel neukradne fokus
-  z editoru (`.nonactivatingPanel`) a má tlačítko *Ztlumit na hodinu*.
-* **Co stroj hřeje:** vedle stavu ukáže tři nejžravější procesy podle CPU, takže
-  je rovnou vidět akce („zavři simulátor“), ne jen varování.
-* **Push na mobil** přes [ntfy.sh](https://ntfy.sh) — zdarma, bez účtu, stačí si
-  v aplikaci odebírat zvolené téma. Je to **volitelné**: dokud je `ntfyTopic`
-  prázdné, ze stroje neodchází nic a lokální panel funguje sám.
-* **Hystereze místo spamu:** alert až po třech vzorcích v řadě (15 s), návrat po
-  šesti (30 s), mezi dvěma alerty nejméně 10 minut. Zpráva o návratu do normálu
-  cooldownu nepodléhá — ta musí dorazit vždy, jinak nevíš, že můžeš pokračovat.
-  Ověřeno suchým během posloupnosti stavů, ne jen přečtením kódu.
+**Změřeno, ne odhadnuto:** 0,50 s CPU za 150 s běhu = **0,33 % jednoho jádra**,
+0,033 % desetijádrového stroje; 55 MB RSS; `ps` hlásí 0,0 %. Měřeno včetně startu
+(úklid logu, agregace, výpočet reference), v ustáleném běhu je to méně.
+
+Z čeho ta spotřeba je:
+
+* **Tepelný tlak** se čte každých 5 s a je zadarmo — jedno `notify_get_state`.
+* **Rychlost jádra** se měří jednou za minutu (a po 20 s, když je horko), protože
+  jedno měření stojí ~104 ms práce jednoho jádra. To je ta drahá část, proto je
+  řídká.
+* **Seznam viníků** (`ps`, ~15 ms) se zjišťuje nejvýš jednou za 30 s a jen když
+  tlak není `Nominal`.
 
 ## Metrika: Darwin notify klíč, ne `ProcessInfo`
 
@@ -29,57 +30,62 @@ retrospektivu („ve 14:32 to stálo — co bylo tehdy?“).
 notifyutil -g com.apple.system.thermalpressurelevel   →  2
 ```
 
-Hodnoty 0–4 jsou `Nominal`, `Moderate`, `Heavy`, `Trapping`, `Sleeping` — škála je
+Hodnoty 0–4 jsou `Nominal`, `Moderate`, `Heavy`, `Trapping`, `Sleeping`; škála je
 z hlavičky SDK na tomhle stroji,
-`/Library/Developer/CommandLineTools/SDKs/MacOSX27.0.sdk/usr/include/libkern/OSThermalNotification.h`,
-větev `#if TARGET_OS_OSX` (druhá větev s 10/20/30/40/50 je iOS). **Heavy a výš =
-systém reálně omezuje výkon.** Čtení nevyžaduje root; v kódu přes `notify_register_check`
-+ `notify_get_state` (`src/Pressure.swift`).
+`…/MacOSX27.0.sdk/usr/include/libkern/OSThermalNotification.h`, větev
+`#if TARGET_OS_OSX`. **Heavy a výš = systém reálně omezuje výkon.** Root není
+potřeba (`src/Pressure.swift`).
 
-Dvě slepé uličky, obě ověřené spuštěním na tomhle M5:
+Past, kvůli které tenhle nástroj existuje: **`ProcessInfo.thermalState` throttling
+maskuje.** Ve stejném okamžiku, kdy notify klíč hlásil `2` (Heavy), vracelo veřejné
+API `fair` — slévá `Moderate` a `Heavy` do jedné hodnoty. Většina návodů staví
+právě na něm.
+
+Slepé uličky, všechny ověřené spuštěním na tomhle M5:
 
 | zdroj | výsledek |
 |---|---|
-| `pmset -g therm` | `No CPU power status has been recorded` — `CPU_Speed_Limit` je intelovský mechanismus, na Apple Silicon mrtvý |
+| `pmset -g therm` | `No CPU power status has been recorded` — `CPU_Speed_Limit` je intelovský, na Apple Silicon mrtvý |
 | `pmset -g thermlog` | prázdné |
 | `sysctl -a \| grep -i thermal` | nic |
 | `powermetrics -s smc,thermal` | `must be invoked as the superuser` |
 | `ioreg -c AppleSMC` | `AppleARMPMUTempSensor` teplotu v properties nevystavuje |
-| `ioreg -r -c AppleSmartBattery` | napětí, proud, cykly; teplotu ne |
 
-A hlavně past: **`ProcessInfo.thermalState` throttling maskuje.** Ve stejném
-okamžiku, kdy notify klíč hlásil `2` (Heavy), vracelo veřejné API `fair` — slévá
-`Moderate` a `Heavy` do jedné hodnoty, takže nerozliší zahřátý stroj od omezeného.
-Verdikt na něm proto nestojí; hodnota se do záznamu ukládá jen jako doklad rozdílu.
+## Druhá metrika: o kolik jsi pomalejší
 
-Druhý, doplňkový signál je **měřená efektivní rychlost jádra**: referenční smyčka
-v dávkách, bere se nejlepší čas proti kalibrovanému minimu. Říká *o kolik* je to
-pomalejší a odliší teplo od obyčejného zahlcení CPU (`Verdict.cause()` to pojmenuje:
-teplo / zátěž CPU podle load average / Low Power Mode).
+Referenční smyčka v dávkách, nejlepší čas proti referenci. Říká *o kolik*, a
+odliší teplo od obyčejného zahlcení CPU. **Sama o sobě nikdy nedá červenou** —
+zastropuje se na „mírné“, protože je citlivá na souboj o jádra. Červená znamená,
+že systém opravdu omezuje výkon.
 
-## Tři věci, které měření rychlosti rozbíjely
+Tři věci, které tohle měření rozbíjely. Každá stála jeden chybný výsledek:
 
-Měřená zjištění, každé stálo jeden chybný výsledek:
+* **Optimalizátor smyčku odstranil.** S `-O` vracelo měření 0 ns: devět volání
+  čisté funkce se stejnými argumenty Swift sloučí do jednoho (CSE). Seed se proto
+  bere per-call z časovače. `src/Sampler.swift` → `burstNanos()`.
+* **Rozjezd taktu.** Vlákno, které spí a pak chvíli počítá, dostane nízkou
+  frekvenci — DVFS se řídí historií thread group. Na zatíženém stroji stačilo
+  10 ms warmupu, ale na **nečinném** ne: 12 ms → 691/561/614 µs, 24 ms →
+  533/545/544 µs, 48 ms → 410/359/411 µs, 100 ms → 344/343/343 µs. S krátkým
+  warmupem hlásil zdravý nečinný stroj „60 %“ — měřicí chyba, ne throttling.
+  Proto `warmups = 250` dávek ≈ 100 ms.
+* **Reference nesmí být minimum.** Měření je dvouvrcholové (občas ~360 µs, když je
+  jádro od jiné práce rozjeté, obvykle ~600 µs); minimum se chytne té výjimky a
+  pak i zdravý stroj hlásí 60 %. Reference je proto **desátý percentil časů
+  naměřených ve stejných podmínkách** (agent vs. CLI) za 7 dní — „jak rychle to
+  tady jede, když je dobře“. `src/Store.swift` → `reference()`.
 
-* **Optimalizátor smyčku odstranil.** S `-O` vracelo měření 0 ns: devět volání čisté
-  funkce se stejnými argumenty Swift sloučí do jednoho (CSE). Seed se proto bere
-  per-call z časovače. `src/Sampler.swift` → `burstNanos()`.
-* **Rozjezd frekvence.** Vlákno, které 5 s spí a pak 4 ms počítá, dostane nízkou
-  frekvenci — DVFS se na Apple Silicon řídí historií thread group. Naměřeno ve dvou
-  sériích: warmup 0,8 ms → 640/622 µs, 4 ms → 628/616 µs, 10 ms → 393/396 µs,
-  80 ms → 396/380 µs. Bez warmupu to neměří throttling, ale vlastní rozjezd. Proto
-  `Sampler.warmups = 30` dávek ≈ 12 ms.
-* **Jeden vzorek je šum.** Verdikt bere nejlepší hodnotu z okna 30 s
-  (`Verdict.smoothSeries`); tepelný tlak se ale bere nejhorší z okna, protože to je
-  fakt od systému, ne odhad.
+## Upozornění
 
-## Co to stojí
-
-Jeden vzorek = `Sampler.warmups + Sampler.bursts` = 40 dávek po ~0,4 ms, tedy
-**~16 ms práce jednoho jádra každých 5 s** (interval v `src/App.swift`,
-`private let interval: TimeInterval = 5`): 0,3 % jednoho jádra, 0,03 % desetijádra.
-V `ps` se aplikace drží na 0,0 % CPU a ~50 MB RSS. `ps` na procesy se spouští jen
-při alertu, ne při každém vzorku.
+* **Plovoucí okno**, vidět i nad aplikací na celou obrazovku — `display notification`
+  se při Focusu a ve full-screenu schová do Centra oznámení, tedy přesně tehdy, kdy
+  se vibecoduje. Fokus z editoru nekrade, má tlačítko *Ztlumit na hodinu*.
+* **Obsahuje viníky:** tři nejžravější procesy, takže je vidět akce, ne jen varování.
+* **Push na mobil** přes [ntfy.sh](https://ntfy.sh) — volitelné, dokud je `ntfyTopic`
+  prázdné, neodchází ze stroje nic.
+* **Hystereze:** alert až po třech vzorcích v řadě (15 s), návrat po šesti (30 s),
+  mezi alerty nejméně 10 minut. Zpráva o návratu cooldownu nepodléhá. Ověřeno
+  suchým během posloupnosti stavů.
 
 ## Instalace
 
@@ -87,18 +93,34 @@ při alertu, ne při každém vzorku.
 ./install.sh
 ```
 
-Přeloží to, zkopíruje `ThermalWatch.app` do `~/Applications` a zaregistruje
-LaunchAgent (`~/Library/LaunchAgents/cz.filipburda.thermalwatch.plist`,
-`RunAtLoad` + `KeepAlive`), takže to jede na pozadí a nastartuje po přihlášení.
-Odinstalace `./uninstall.sh` — data nechá být.
+Přeloží, zkopíruje do `~/Applications` a zaregistruje LaunchAgent
+(`cz.filipburda.thermalwatch`, `RunAtLoad` + `KeepAlive`), takže jede na pozadí a
+nastartuje po přihlášení. Po každé změně kódu spusť `./install.sh` znovu — jinak
+běží stará kopie z `~/Applications`. Odinstalace `./uninstall.sh`.
 
-## Push na mobil (volitelné)
+## CLI
 
-1. Nainstaluj si ntfy ([iOS](https://apps.apple.com/app/ntfy/id1625396347) /
-   Android) a vymysli si **neuhodnutelné** téma, např. `thermal-f7k2x9qp` — téma je
-   jediné heslo, kdo ho zná, čte tvoje zprávy.
-2. V aplikaci si ho odeber.
-3. Zapiš ho do configu a restartuj agenta:
+```sh
+build/thermalwatch --who        # co mi právě teď hřeje stroj
+build/thermalwatch --stats 7    # rozpad: co mě za 7 dní nejvíc zpomalovalo
+build/thermalwatch --report 60  # retrospektiva poslední hodiny po minutách
+build/thermalwatch --once
+build/thermalwatch --watch
+build/thermalwatch --test-alert
+build/thermalwatch --config
+```
+
+`--who` dává dvě tabulky: co vytěžuje CPU teď, a co **spálilo nejvíc času
+procesoru od svého spuštění**. To druhé je lepší odpověď na „co mi zbytečně hřeje
+stroj“ — okamžitá špička může být legitimní build, ale aplikace, která za den
+spálila hodinu CPU na pozadí, je kandidát na zavření.
+
+## Push na mobil
+
+1. Nainstaluj ntfy (iOS/Android) a vymysli si **neuhodnutelné** téma, např.
+   `thermal-f7k2x9qp` — téma je jediné heslo.
+2. Odeber si ho v aplikaci.
+3. Zapiš do configu a restartuj agenta:
 
 ```sh
 open -a TextEdit "$HOME/Library/Application Support/ThermalWatch/config.json"
@@ -108,51 +130,30 @@ open -a TextEdit "$HOME/Library/Application Support/ThermalWatch/config.json"
 launchctl kickstart -k "gui/$(id -u)/cz.filipburda.thermalwatch"
 ```
 
-Ověř:
-
-```sh
-~/Developer/GitHub/thermal-watch/build/thermalwatch --test-alert
-```
-
-Config (`--config` vypíše cestu i obsah):
-
 | klíč | výchozí | co dělá |
 |---|---|---|
-| `ntfyTopic` | `""` | prázdné = vzdálený kanál vypnutý, nic neodchází |
-| `ntfyServer` | `https://ntfy.sh` | vlastní instance, když chceš |
+| `ntfyTopic` | `""` | prázdné = vzdálený kanál vypnutý |
+| `ntfyServer` | `https://ntfy.sh` | vlastní instance |
 | `panel` | `true` | plovoucí okno |
 | `sound` | `true` | zvuk k alertu |
 | `cooldownSeconds` | `600` | minimální odstup mezi alerty |
 | `alertOnModerate` | `false` | upozorňovat už na `Moderate` |
 
-## CLI
-
-```sh
-build/thermalwatch --once            # jeden odečet
-build/thermalwatch --watch           # průběžně v terminálu
-build/thermalwatch --report 60       # retrospektiva: kdy to vázlo a proč
-build/thermalwatch --chart graf.png 30
-build/thermalwatch --test-alert      # zkušební alert do obou kanálů
-build/thermalwatch --config
-```
-
 ## Data
 
 `~/Library/Application Support/ThermalWatch/`
 
-* `samples.jsonl` — vzorek na řádek, při startu zkráceno na 48 h
-* `alerts.log` — kdy a proč alert padl (i potlačené pokusy)
-* `state.json` — kalibrované minimum, `config.json` — nastavení
+* `samples.jsonl` — syrové vzorky, drží se 3 dny (~3 MB/den)
+* `hours.jsonl` — hodinové souhrny, **nemažou se** (jednotky MB za rok); z nich
+  se počítá `--stats`
+* `alerts.log` — kdy a proč alert padl, i potlačené pokusy
+* `state.json`, `config.json`
 
 Do repozitářů, se kterými pracuješ, nástroj nezapisuje nic.
 
 ## Hranice
 
-* **Teplota ve stupních ne.** Bez `sudo` není odkud (viz tabulka). Na otázku
-  „omezuje mě to“ odpovídá tlak lépe než stupně.
-* **Kalibrace 100 % může být zkreslená**, když proběhla ve chvíli, kdy stroj už byl
-  na `Heavy` — pak je „100 %“ throttlovaná rychlost. Proto je v menu *Překalibrovat
-  100 %*; dělej to, když je `--once` na `Nominal`. Verdikt tím netrpí, ten stojí
-  na tlaku.
+* Teplota ve stupních ne — bez `sudo` není odkud.
 * GPU throttling se neměří, jen CPU.
 * Prvních ~30 s po startu je okno pro vyhlazení neúplné.
+* Statistika potřebuje nasbíraná data; `--stats` má smysl až po pár dnech běhu.

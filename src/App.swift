@@ -36,8 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         activity = ProcessInfo.processInfo.beginActivity(
             options: .userInitiated, reason: "thermal sampling")
+        Sampler.isGUI = true
         Store.trim()
-        baseline = Store.baseline()
+        Stats.catchUp()
+        baseline = Store.reference()
         samples = Store.recent(minutes: 30)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -52,6 +54,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(summary)
         menu.addItem(.separator())
+        let who = NSMenuItem(title: "Co mě teď hřeje…", action: #selector(showWho), keyEquivalent: "")
+        who.target = self
+        menu.addItem(who)
+        let stats = NSMenuItem(title: "Zkopírovat statistiku za 7 dní",
+                               action: #selector(copyStats), keyEquivalent: "")
+        stats.target = self
+        menu.addItem(stats)
         let copy = NSMenuItem(title: "Zkopírovat report za 30 min",
                               action: #selector(copyReport), keyEquivalent: "c")
         copy.target = self
@@ -85,15 +94,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timer = Timer.scheduledTimer(timeInterval: interval, target: self,
                                      selector: #selector(tick), userInfo: nil, repeats: true)
         timer?.tolerance = 1
+        // Hodinové souhrny jsou to jediné, co přežije mazání syrových vzorků.
+        let agg = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
+            Stats.catchUp()
+            // Referenci přepočítat, ať se usazuje podle toho, co stroj opravdu umí.
+            self?.baseline = Store.reference()
+        }
+        agg.tolerance = 60
     }
 
     @objc private func tick() {
         let s = Sampler.sample(baseline: baseline)
-        // 100 % se zpřesňuje na nejlepší kdy viděný čas
-        if s.nanos < baseline {
-            baseline = s.nanos
-            Store.saveBaseline(baseline)
-        }
         Store.append(s)
         samples.append(s)
         let cutoff = Date().timeIntervalSince1970 - 30 * 60
@@ -107,9 +118,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let smooth = Verdict.smoothSeries(samples)
         let s = smooth.last ?? raw
         let lvl = Verdict.overall(s)
-        let glyph = ["●", "●", "●"][lvl.rawValue]
+        // Bez změřené rychlosti zůstane v liště jen tečka – stav z tepelného tlaku.
+        let suffix = s.speedPct.map { " \(Int($0.rounded())) %" } ?? ""
         let title = NSMutableAttributedString(
-            string: "\(glyph) \(Int(s.speedPct.rounded())) %",
+            string: "●" + suffix,
             attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
                 .foregroundColor: NSColor.labelColor,
@@ -119,11 +131,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.attributedTitle = title
 
         headline.title = Report.statusLine(s)
-        detail.title = String(
-            format: "tlak %@ · poslední měření %.0f µs → %.0f %% · 100 %% = %.0f µs%@",
-            Pressure.name(raw.pressure), Double(raw.nanos) / 1000, raw.speedPct,
-            Double(baseline) / 1000,
-            raw.lowPower ? " · Low Power Mode" : "")
+        let measured = raw.nanos.map {
+            String(format: "poslední měření %.0f µs → %.0f %% · 100 %% = %.0f µs",
+                   Double($0) / 1000, raw.speedPct ?? 0, Double(baseline) / 1000)
+        } ?? "rychlost se měří jednou za minutu"
+        detail.title = "tlak \(Pressure.name(raw.pressure)) · \(measured)"
+            + (raw.lowPower ? " · Low Power Mode" : "")
 
         chart.samples = smooth
         chart.needsDisplay = true
@@ -132,7 +145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             summary.title = ""
         } else {
             let bad = smooth.filter { Verdict.overall($0) != .ok }.count
-            let worstPct = smooth.map(\.speedPct).min() ?? 100
+            let worstPct = smooth.compactMap(\.speedPct).min() ?? 100
             summary.title = String(
                 format: "30 min: %d vzorků · omezení v %.0f %% času · minimum %.0f %%",
                 smooth.count, 100 * Double(bad) / Double(smooth.count), worstPct)
@@ -145,6 +158,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
+    @objc private func showWho() {
+        alerter.showInfo(title: "Co mě teď hřeje", body: Pressure.whoIsHeating())
+    }
+
+    @objc private func copyStats() {
+        Stats.catchUp()
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(Stats.report(days: 7), forType: .string)
+    }
+
     @objc private func revealLog() {
         NSWorkspace.shared.selectFile(Store.logURL.path,
                                       inFileViewerRootedAtPath: Store.dir.path)
@@ -153,7 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func testAlert() {
         let base = baseline > 0 ? baseline : 1
         alerter.reloadConfig()
-        alerter.fireThrottleAlert(Sampler.sample(baseline: base))
+        alerter.fireThrottleAlert(Sampler.sample(baseline: base, force: true))
     }
 
     @objc private func openConfig() {
@@ -163,7 +186,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func recalibrate() {
         baseline = Sampler.calibrate()
-        Store.saveBaseline(baseline)
         tick()
     }
 }

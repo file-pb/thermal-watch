@@ -40,27 +40,76 @@ enum Pressure {
     }
 
     /// Nejvíc vytížené procesy – aby alert řekl i co s tím, ne jen že je zle.
-    /// Spouští `ps` jen při alertu, ne při každém vzorku.
-    static func topProcesses(_ n: Int = 3) -> [(name: String, cpu: Double)] {
+    /// Jedno spuštění `ps` stojí ~15 ms CPU, proto se volá jen když je horko.
+    ///
+    /// `cpu` je okamžité vytížení, `seconds` je **celkový** čas procesoru, který
+    /// proces spálil od spuštění. To druhé je lepší odpověď na „co mi zbytečně
+    /// hřeje stroj“: okamžitá špička může být legitimní build, ale aplikace, která
+    /// za den spálila hodinu CPU na pozadí, je kandidát na zavření.
+    static func processes() -> [(name: String, cpu: Double, seconds: Double)] {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-Aceo", "pcpu,comm", "-r"]
+        p.arguments = ["-Aceo", "pcpu,time,comm", "-r"]
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return [] }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        var out: [(String, Double)] = []
+
+        var out: [(String, Double, Double)] = []
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n").dropFirst() {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            guard let sp = t.firstIndex(of: " "), let cpu = Double(t[t.startIndex..<sp]) else { continue }
-            let name = t[t.index(after: sp)...].trimmingCharacters(in: .whitespaces)
+            let f = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard f.count >= 3, let cpu = Double(f[0]) else { continue }
+            let name = f[2...].joined(separator: " ")
             if name.contains("ThermalWatch") { continue }
-            if cpu < 5 { break }
-            out.append((name, cpu))
-            if out.count == n { break }
+            out.append((name, cpu, parseTime(String(f[1]))))
         }
         return out
+    }
+
+    /// `ps` píše čas jako `[dd-]hh:mm.ss` nebo `mm:ss.hh`.
+    static func parseTime(_ s: String) -> Double {
+        var rest = s
+        var days = 0.0
+        if let dash = rest.firstIndex(of: "-") {
+            days = Double(rest[rest.startIndex..<dash]) ?? 0
+            rest = String(rest[rest.index(after: dash)...])
+        }
+        let parts = rest.split(separator: ":").map { Double($0) ?? 0 }
+        let hms: Double
+        switch parts.count {
+        case 3: hms = parts[0] * 3600 + parts[1] * 60 + parts[2]
+        case 2: hms = parts[0] * 60 + parts[1]
+        default: hms = parts.first ?? 0
+        }
+        return days * 86_400 + hms
+    }
+
+    static func topProcesses(_ n: Int = 3) -> [(name: String, cpu: Double)] {
+        processes().filter { $0.cpu >= 5 }.prefix(n).map { ($0.name, $0.cpu) }
+    }
+
+    /// Text pro otázku „co mi teď hřeje stroj“.
+    static func whoIsHeating() -> String {
+        let all = processes()
+        var out: [String] = []
+        out.append("tepelný tlak: \(name(level()))")
+        out.append("")
+        let now = all.filter { $0.cpu >= 5 }.prefix(5)
+        if now.isEmpty {
+            out.append("teď nic výrazně nevytěžuje CPU")
+        } else {
+            out.append("vytěžuje CPU právě teď:")
+            for p in now { out.append(String(format: "   %5.0f %%  %@", p.cpu, p.name)) }
+        }
+        out.append("")
+        out.append("spálilo nejvíc času procesoru od svého spuštění:")
+        for p in all.sorted(by: { $0.seconds > $1.seconds }).prefix(5) {
+            let m = p.seconds / 60
+            let t = m >= 60 ? String(format: "%.1f h", m / 60) : String(format: "%.0f min", m)
+            out.append(String(format: "   %7@  %@", t as NSString, p.name))
+        }
+        return out.joined(separator: "\n")
     }
 }

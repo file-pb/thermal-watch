@@ -12,14 +12,17 @@ struct Report {
         var extra = ""
         if s.lowPower { extra += " [low power]" }
         if !s.onAC { extra += " [baterie]" }
+        let speed = s.speedPct.map { String(format: "%.0f %%", $0) } ?? "neměřeno"
         return String(
-            format: "%@ %@ — %@ · tlak %@ · rychlost %.0f %% · load %.2f%@",
-            mark, lvl.label, Verdict.cause(s), Pressure.name(s.pressure), s.speedPct, s.load1, extra
+            format: "%@ %@ — %@ · tlak %@ · rychlost %@ · load %.2f%@",
+            mark, lvl.label, Verdict.cause(s), Pressure.name(s.pressure), speed, s.load1, extra
         )
     }
 
     /// Sparkline z procent efektivní rychlosti, 50–105 % na osmi úrovních.
-    static func sparkline(_ samples: [Sample], width: Int = 60) -> String {
+    /// Mezera = v té chvíli se neměřilo (nečinný stroj).
+    static func sparkline(_ all: [Sample], width: Int = 60) -> String {
+        let samples = all
         guard !samples.isEmpty else { return "(bez dat)" }
         let blocks = Array("▁▂▃▄▅▆▇█")
         let buckets = max(1, min(width, samples.count))
@@ -28,7 +31,7 @@ struct Report {
             let lo = i * samples.count / buckets
             let hi = max(lo + 1, (i + 1) * samples.count / buckets)
             let slice = samples[lo..<hi]
-            let worst = slice.map(\.speedPct).min() ?? 100
+            guard let worst = slice.compactMap(\.speedPct).min() else { out.append(" "); continue }
             let norm = max(0.0, min(1.0, (worst - 50) / 55))
             out.append(blocks[Int(norm * 7.0 + 0.5)])
         }
@@ -45,7 +48,7 @@ struct Report {
         lines.append("ThermalWatch — posledních \(Int(minutes)) min, \(all.count) vzorků")
         lines.append("rychlost: \(sparkline(all))   (▁ = 50 %, █ = 105 %)")
         let worst = all.min { Verdict.overall($0).rawValue == Verdict.overall($1).rawValue
-            ? $0.speedPct < $1.speedPct
+            ? ($0.speedPct ?? 100) < ($1.speedPct ?? 100)
             : Verdict.overall($0).rawValue > Verdict.overall($1).rawValue }
         if let w = worst {
             lines.append("nejhorší: \(ts.string(from: Date(timeIntervalSince1970: w.t))) — \(statusLine(w))")
@@ -63,8 +66,9 @@ struct Report {
             let m = String(ts.string(from: Date(timeIntervalSince1970: s.t)).prefix(5))
             if m == lastMinute { continue }
             lastMinute = m
-            flagged.append(String(format: "  %@  %.0f %%  tlak %@  load %.1f",
-                                  m, s.speedPct, Pressure.name(s.pressure), s.load1))
+            let sp = s.speedPct.map { String(format: "%.0f %%", $0) } ?? "   —"
+            flagged.append(String(format: "  %@  %@  tlak %@  load %.1f",
+                                  m, sp, Pressure.name(s.pressure), s.load1))
         }
         if !flagged.isEmpty {
             lines.append("minuty s omezením:")
