@@ -22,6 +22,10 @@ struct Sample: Codable {
     let speedPct: Double?
     let nanos: UInt64?   // nejlepší čas referenční smyčky, když se měřilo
     let load1: Double    // 1min load average
+    /// Vytížení všech jader od minulého vzorku, v procentech. Na rozdíl od `load1`
+    /// (minutový průměr, reaguje pomalu) zachytí i krátký souboj o jádra, který
+    /// sráží měřenou rychlost. Volitelné kvůli starším záznamům.
+    let cpu: Double?
     let lowPower: Bool   // Low Power Mode
     let onAC: Bool       // na napájení ze sítě
     /// Měřeno z agenta na pozadí (true) nebo z jednorázového CLI běhu (false).
@@ -69,8 +73,14 @@ enum Verdict {
         return .throttling
     }
 
-    /// Load, od kterého je pokles rychlosti vysvětlitelný soupeřením o jádra.
-    static let busyLoad = 3.0
+    /// Vytížení CPU, od kterého je pokles rychlosti vysvětlitelný soupeřením o jádra.
+    static let busyCpu = 55.0
+
+    /// Okamžité vytížení vzorku; u starších záznamů se dopočítá z `load1`.
+    static func busy(_ s: Sample) -> Double {
+        if let c = s.cpu { return c }
+        return 100 * s.load1 / Double(ProcessInfo.processInfo.activeProcessorCount)
+    }
 
     /// Tepelný tlak je fakt od systému, měřená rychlost je odhad citlivý na souboj
     /// o jádra. Proto rychlost sama o sobě nikdy nedá červenou: bez tepelného tlaku
@@ -108,7 +118,7 @@ enum Verdict {
                 j -= 1; used += 1
             }
             out.append(Sample(t: s.t, pressure: pressure, thermal: thermal, speedPct: pct,
-                              nanos: s.nanos, load1: s.load1, lowPower: s.lowPower,
+                              nanos: s.nanos, load1: s.load1, cpu: s.cpu, lowPower: s.lowPower,
                               onAC: s.onAC, gui: s.gui, top: s.top))
         }
         return out
@@ -126,7 +136,7 @@ enum Verdict {
         if p.rawValue >= v.rawValue, p != .ok { return .heat }
         if v != .ok {
             if s.lowPower { return .lowPower }
-            return s.load1 >= busyLoad ? .load : .other
+            return busy(s) >= busyCpu ? .load : .other
         }
         return .none
     }
@@ -138,7 +148,7 @@ enum Verdict {
             return pressureLevel(s.pressure) == .throttling
                 ? "teplo – systém je na \(name)" : "teplo stoupá (\(name))"
         case .load:
-            return String(format: "zátěž CPU (load %.1f), tlak %@", s.load1, name)
+            return String(format: "zátěž CPU (%.0f %% jader), tlak %@", busy(s), name)
         case .lowPower:
             return "Low Power Mode, ne teplo"
         case .other:
@@ -228,6 +238,29 @@ struct Sampler {
     /// Delší měření pro první kalibraci.
     static func calibrate() -> UInt64 { measure(bursts: 40, warmups: 40) }
 
+    /// Vytížení všech jader od minulého volání, z tiků jádra. Stojí mikrosekundy.
+    private static var prevTicks: (busy: Double, total: Double)?
+
+    static func cpuBusyPct() -> Double? {
+        var info = host_cpu_load_info()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
+        let r = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        guard r == KERN_SUCCESS else { return nil }
+        let u = Double(info.cpu_ticks.0), sy = Double(info.cpu_ticks.1)
+        let i = Double(info.cpu_ticks.2), n = Double(info.cpu_ticks.3)
+        let now = (busy: u + sy + n, total: u + sy + n + i)
+        defer { prevTicks = now }
+        guard let p = prevTicks else { return nil }   // první vzorek nemá s čím porovnat
+        let db = now.busy - p.busy, dt = now.total - p.total
+        guard dt > 0 else { return nil }
+        return 100 * db / dt
+    }
+
     static func loadAvg1() -> Double {
         var l = [Double](repeating: 0, count: 3)
         guard getloadavg(&l, 3) > 0 else { return 0 }
@@ -265,6 +298,9 @@ struct Sampler {
     static func sample(baseline reference: UInt64, force: Bool = false) -> Sample {
         let pressure = Pressure.level()
         let load = loadAvg1()
+        // Číst se musí vždycky, i když se rychlost neměří – jinak by příští rozdíl
+        // tiků pokrýval několik vzorků a hlásil průměr, ne okamžik.
+        let cpu = cpuBusyPct()
 
         var n: UInt64?
         var pct: Double?
@@ -295,6 +331,7 @@ struct Sampler {
             speedPct: pct,
             nanos: n,
             load1: load,
+            cpu: cpu,
             lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled,
             onAC: onACPower(),
             gui: isGUI,

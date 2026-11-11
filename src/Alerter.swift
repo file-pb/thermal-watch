@@ -5,13 +5,19 @@ import AppKit
 /// Hystereze je tu důležitější než přesnost čidla: alert na každý vzorek by byl
 /// k ničemu. Vstup do stavu „omezeno“ až po `enterAfter` vzorcích v řadě,
 /// návrat po `exitAfter`, mezi dvěma alerty nejméně `config.cooldownSeconds`.
-/// Zpráva o návratu do normálu cooldownu nepodléhá – ta musí dorazit vždy,
-/// jinak uživatel neví, že může pokračovat.
+/// Zpráva o návratu do normálu cooldownu nepodléhá, ale posílá se jen tehdy, když
+/// uživatel skutečně dostal varování. Lokálně se návrat projeví zmizením panelu
+/// (vyskakovat podruhé jen kvůli dobré zprávě by rušilo); na mobil jde přes ntfy,
+/// pokud je nakonfigurované.
 final class Alerter {
     private var config = Config.load()
     private var badRun = 0
     private var goodRun = 0
     private var alerting = false
+    /// Jestli uživatel nějaké upozornění **opravdu** dostal. Bez toho by po alertu
+    /// spolknutém cooldownem nebo ztlumením přišla zpráva „zpátky na plném výkonu“
+    /// za varování, které nikdy nevyskočilo.
+    private var alerted = false
     private var lastAlertAt: Date?
     private var snoozedUntil: Date?
     private var panel: AlertPanel?
@@ -39,10 +45,11 @@ final class Alerter {
 
         if !alerting, badRun >= enterAfter {
             alerting = true
-            fireThrottleAlert(s)
+            alerted = fireThrottleAlert(s)
         } else if alerting, goodRun >= exitAfter {
             alerting = false
-            fireRecovery(s)
+            if alerted { fireRecovery(s) } else { panel?.close(); panel = nil }
+            alerted = false
         }
     }
 
@@ -79,7 +86,6 @@ final class Alerter {
     func fireRecovery(_ s: Sample) {
         panel?.close()
         panel = nil
-        guard lastAlertAt != nil else { return }
         let speed = s.speedPct.map { String(format: " · rychlost zpět na %.0f %%", $0) } ?? ""
         let body = "Tepelný tlak \(Pressure.name(s.pressure))\(speed)"
         sendRemote(body: "✅ Zpátky na plném výkonu\n\(body)", priority: "low", tags: "white_check_mark")

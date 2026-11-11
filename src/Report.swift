@@ -14,8 +14,9 @@ struct Report {
         if !s.onAC { extra += " [baterie]" }
         let speed = s.speedPct.map { String(format: "%.0f %%", $0) } ?? "neměřeno"
         return String(
-            format: "%@ %@ — %@ · tlak %@ · rychlost %@ · load %.2f%@",
-            mark, lvl.label, Verdict.cause(s), Pressure.name(s.pressure), speed, s.load1, extra
+            format: "%@ %@ — %@ · tlak %@ · rychlost %@ · CPU %.0f %%%@",
+            mark, lvl.label, Verdict.cause(s), Pressure.name(s.pressure), speed,
+            Verdict.busy(s), extra
         )
     }
 
@@ -67,8 +68,8 @@ struct Report {
             if m == lastMinute { continue }
             lastMinute = m
             let sp = s.speedPct.map { String(format: "%.0f %%", $0) } ?? "   —"
-            flagged.append(String(format: "  %@  %@  tlak %@  load %.1f",
-                                  m, sp, Pressure.name(s.pressure), s.load1))
+            flagged.append(String(format: "  %@  %@  tlak %@  CPU %.0f %%",
+                                  m, sp, Pressure.name(s.pressure), Verdict.busy(s)))
         }
         if !flagged.isEmpty {
             lines.append("minuty s omezením:")
