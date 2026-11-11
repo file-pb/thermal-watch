@@ -10,6 +10,8 @@ struct Config: Codable {
     var sound: Bool = true
     var cooldownSeconds: Double = 600
     var alertOnModerate: Bool = false
+    /// Mini graf trendu vedle tečky v liště.
+    var menuBarChart: Bool = true
 
     static var url: URL { Store.dir.appendingPathComponent("config.json") }
 

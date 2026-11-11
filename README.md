@@ -6,8 +6,10 @@ jakéhokoli modelu — je to obyčejný Swift binárník, takže nespotřebováv
 kredity. Jediné síťové volání v celém kódu je volitelný POST na ntfy při alertu
 (`src/Alerter.swift`, `sendRemote`).
 
-V liště je to tichá tečka s procentem. Hlasité je to jen tehdy, když systém
-opravdu omezuje výkon.
+V liště je to tichá tečka s procentem a mini grafem trendu za posledních 30 minut
+(výška sloupce = tepelný tlak, barva = stav), takže je vidět i pík po náročné
+operaci a jeho pozvolný pokles. Hlasité je to jen tehdy, když systém opravdu
+omezuje výkon.
 
 ## Co to stojí
 
@@ -138,6 +140,7 @@ launchctl kickstart -k "gui/$(id -u)/cz.filipburda.thermalwatch"
 | `sound` | `true` | zvuk k alertu |
 | `cooldownSeconds` | `600` | minimální odstup mezi alerty |
 | `alertOnModerate` | `false` | upozorňovat už na `Moderate` |
+| `menuBarChart` | `true` | mini graf trendu v liště |
 
 ## Data
 

@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var samples: [Sample] = []
 
     private let alerter = Alerter()
+    private var config = Config.load()
     private let chart = ChartView(frame: NSRect(x: 0, y: 0, width: 340, height: 118))
     private let headline = NSMenuItem(title: "…", action: nil, keyEquivalent: "")
     private let detail = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -44,6 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        statusItem.button?.imagePosition = .imageTrailing
+        statusItem.button?.imageHugsTitle = true
 
         let menu = NSMenu()
         let chartItem = NSMenuItem()
@@ -140,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         chart.samples = smooth
         chart.needsDisplay = true
+        statusItem.button?.image = config.menuBarChart ? AppDelegate.trendImage(smooth) : nil
 
         if smooth.isEmpty {
             summary.title = ""
@@ -156,6 +160,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let text = Report.retrospective(minutes: 30)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Mini graf trendu do lišty: výška = tepelný tlak, barva = stav v tu chvíli.
+    /// Po náročné operaci je vidět pík a jeho pozvolný pokles.
+    static func trendImage(_ samples: [Sample], width: CGFloat = 46, height: CGFloat = 13) -> NSImage {
+        let img = NSImage(size: NSSize(width: width, height: height))
+        img.lockFocus()
+        defer { img.unlockFocus() }
+
+        // Základní linka, ať je i „všechno v pořádku“ vidět jako stav, ne jako prázdno.
+        NSColor.tertiaryLabelColor.setFill()
+        NSRect(x: 0, y: 0, width: width, height: 1).fill()
+
+        guard !samples.isEmpty else { return img }
+        let window: Double = 30 * 60
+        let now = Date().timeIntervalSince1970
+        let bar: CGFloat = 2                 // souvislý pás, bez mezer: v liště se čte líp
+        let cols = Int(width / bar)
+        var bucket = [Int?](repeating: nil, count: cols)
+        var sev = [Int](repeating: 0, count: cols)
+        for s in samples {
+            let age = now - s.t
+            guard age >= 0, age <= window else { continue }
+            let i = min(cols - 1, Int((1 - age / window) * Double(cols)))
+            let p = s.pressure ?? 0
+            if bucket[i] == nil || p > bucket[i]! { bucket[i] = p }
+            sev[i] = max(sev[i], Verdict.overall(s).rawValue)
+        }
+        for (i, p) in bucket.enumerated() {
+            guard let p else { continue }
+            // 0 = jen nub nad linkou, pak po stupních tlaku až po plnou výšku
+            let h = max(2, min(height, CGFloat(p) * (height - 2) / 3 + 2))
+            ChartView.colors[sev[i]].withAlphaComponent(p == 0 ? 0.55 : 0.95).setFill()
+            NSRect(x: CGFloat(i) * bar, y: 0, width: bar, height: h).fill()
+        }
+        return img
     }
 
     @objc private func showWho() {
@@ -176,11 +216,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func testAlert() {
         let base = baseline > 0 ? baseline : 1
         alerter.reloadConfig()
+        config = Config.load()
         alerter.fireThrottleAlert(Sampler.sample(baseline: base, force: true))
     }
 
     @objc private func openConfig() {
-        _ = Config.load() // vytvoří soubor, když ještě není
+        config = Config.load() // vytvoří soubor, když ještě není
         NSWorkspace.shared.selectFile(Config.url.path, inFileViewerRootedAtPath: Store.dir.path)
     }
 
