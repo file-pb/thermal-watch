@@ -95,20 +95,20 @@ enum Verdict {
 
     /// Příčina – to je ta odpověď, kterou uživatel chce: teplo, nebo zátěž?
     static func cause(_ s: Sample) -> String {
-        switch pressureLevel(s.pressure) {
-        case .throttling:
-            return "teplo – systém je na \(Pressure.name(s.pressure))"
-        case .mild:
-            return "teplo stoupá (\(Pressure.name(s.pressure)))"
-        case .ok:
-            break
+        let p = pressureLevel(s.pressure)
+        let v = speedLevel(s.speedPct)
+        let name = Pressure.name(s.pressure)
+        // Pojmenovat se musí ten faktor, který verdikt skutečně vytáhl nahoru,
+        // jinak hlásí „teplo stoupá“ u červeného stavu způsobeného rychlostí.
+        if p.rawValue >= v.rawValue, p != .ok {
+            return p == .throttling ? "teplo – systém je na \(name)" : "teplo stoupá (\(name))"
         }
-        if speedLevel(s.speedPct) != .ok {
+        if v != .ok {
             if s.lowPower { return "Low Power Mode, ne teplo" }
             if s.load1 >= busyLoad {
-                return String(format: "zátěž CPU (load %.1f), ne teplo", s.load1)
+                return String(format: "zátěž CPU (load %.1f), tlak %@", s.load1, name)
             }
-            return "pokles rychlosti bez tepelného tlaku"
+            return "pokles rychlosti, tlak jen \(name)"
         }
         return "bez omezení"
     }
