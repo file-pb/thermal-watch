@@ -64,25 +64,40 @@ final class ChartView: NSView {
             inset.minX + inset.width * CGFloat(max(0, min(1, (t - t0) / (windowMinutes * 60))))
         }
 
-        // plocha pod křivkou
-        let area = NSBezierPath()
-        area.move(to: NSPoint(x: xFor(samples[0].t), y: inset.minY))
-        for s in samples { area.line(to: NSPoint(x: xFor(s.t), y: yFor(s.speedPct))) }
-        area.line(to: NSPoint(x: xFor(samples.last!.t), y: inset.minY))
-        area.close()
-        let cur = Verdict.overall(samples.last!)
-        ChartView.colors[cur.rawValue].withAlphaComponent(0.18).setFill()
-        area.fill()
+        // Souvislé úseky: mezera delší než maxGap (aplikace neběžela) se nespojuje,
+        // jinak by chybějící data vypadala jako pozvolný propad.
+        let maxGap: Double = 20
+        var runs: [[Sample]] = []
+        var run: [Sample] = []
+        for s in samples {
+            if let last = run.last, s.t - last.t > maxGap { runs.append(run); run = [] }
+            run.append(s)
+        }
+        if !run.isEmpty { runs.append(run) }
 
-        // křivka po úsecích – barva podle stavu, aby propad nevypadal zeleně
-        for i in 1..<samples.count {
-            let a = samples[i - 1], b = samples[i]
-            let seg = NSBezierPath()
-            seg.move(to: NSPoint(x: xFor(a.t), y: yFor(a.speedPct)))
-            seg.line(to: NSPoint(x: xFor(b.t), y: yFor(b.speedPct)))
-            seg.lineWidth = 1.5
-            ChartView.colors[max(Verdict.overall(a).rawValue, Verdict.overall(b).rawValue)].setStroke()
-            seg.stroke()
+        for r in runs where r.count >= 2 {
+            // plocha pod křivkou
+            let area = NSBezierPath()
+            area.move(to: NSPoint(x: xFor(r[0].t), y: inset.minY))
+            for s in r { area.line(to: NSPoint(x: xFor(s.t), y: yFor(s.speedPct))) }
+            area.line(to: NSPoint(x: xFor(r.last!.t), y: inset.minY))
+            area.close()
+            // Výplň je neutrální schválně: barvu stavu nese křivka, obarvit celou
+            // plochu podle posledního vzorku by přemalovalo i historii.
+            NSColor.systemGray.withAlphaComponent(0.14).setFill()
+            area.fill()
+
+            // křivka po úsecích – barva podle stavu, aby propad nevypadal zeleně
+            for i in 1..<r.count {
+                let a = r[i - 1], b = r[i]
+                let seg = NSBezierPath()
+                seg.move(to: NSPoint(x: xFor(a.t), y: yFor(a.speedPct)))
+                seg.line(to: NSPoint(x: xFor(b.t), y: yFor(b.speedPct)))
+                seg.lineWidth = 1.5
+                ChartView.colors[max(Verdict.overall(a).rawValue,
+                                     Verdict.overall(b).rawValue)].setStroke()
+                seg.stroke()
+            }
         }
 
         // pás tepelného stavu
