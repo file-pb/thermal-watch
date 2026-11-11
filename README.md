@@ -160,3 +160,7 @@ Do repozitářů, se kterými pracuješ, nástroj nezapisuje nic.
 * GPU throttling se neměří, jen CPU.
 * Prvních ~30 s po startu je okno pro vyhlazení neúplné.
 * Statistika potřebuje nasbíraná data; `--stats` má smysl až po pár dnech běhu.
+
+## Licence
+
+MIT — ber, uprav, používej.
