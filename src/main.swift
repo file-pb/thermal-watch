@@ -79,6 +79,7 @@ case "--config":
     print("  ntfyServer: \(c.ntfyServer)")
     print("  panel: \(c.panel) · sound: \(c.sound) · cooldown: \(Int(c.cooldownSeconds)) s")
     print("  alertOnModerate: \(c.alertOnModerate)")
+    print("  bloky v liště: rychlost \(c.blockSpeed) · teplo \(c.blockHeat) · CPU \(c.blockCpu) · RAM \(c.blockMem) · síť \(c.blockNet)")
 
 case "--help", "-h":
     print("""

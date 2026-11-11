@@ -10,8 +10,33 @@ struct Config: Codable {
     var sound: Bool = true
     var cooldownSeconds: Double = 600
     var alertOnModerate: Bool = false
-    /// Mini graf trendu vedle tečky v liště.
-    var menuBarChart: Bool = true
+    /// Bloky v liště, každý jako dvojice hodnota + grafík.
+    var blockSpeed: Bool = true
+    var blockHeat: Bool = true
+    var blockCpu: Bool = true
+    var blockMem: Bool = false
+    var blockNet: Bool = false
+
+    init() {}
+
+    /// Vlastní dekódování: chybějící klíč bere výchozí hodnotu. Syntetizovaný
+    /// `Codable` by na starším config.json selhal a `load()` by ho přepsal
+    /// výchozím — tedy by zahodil třeba nastavené ntfy téma.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func b(_ k: CodingKeys, _ d: Bool) -> Bool { ((try? c.decodeIfPresent(Bool.self, forKey: k)) ?? nil) ?? d }
+        ntfyTopic = ((try? c.decodeIfPresent(String.self, forKey: .ntfyTopic)) ?? nil) ?? ""
+        ntfyServer = ((try? c.decodeIfPresent(String.self, forKey: .ntfyServer)) ?? nil) ?? "https://ntfy.sh"
+        panel = b(.panel, true)
+        sound = b(.sound, true)
+        cooldownSeconds = ((try? c.decodeIfPresent(Double.self, forKey: .cooldownSeconds)) ?? nil) ?? 600
+        alertOnModerate = b(.alertOnModerate, false)
+        blockSpeed = b(.blockSpeed, true)
+        blockHeat = b(.blockHeat, true)
+        blockCpu = b(.blockCpu, true)
+        blockMem = b(.blockMem, false)
+        blockNet = b(.blockNet, false)
+    }
 
     static var url: URL { Store.dir.appendingPathComponent("config.json") }
 

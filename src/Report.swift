@@ -13,9 +13,10 @@ struct Report {
         if s.lowPower { extra += " [low power]" }
         if !s.onAC { extra += " [baterie]" }
         let speed = s.speedPct.map { String(format: "%.0f %%", $0) } ?? "neměřeno"
+        let temp = s.tempC.map { String(format: " · %.0f °C", $0) } ?? ""
         return String(
-            format: "%@ %@ — %@ · tlak %@ · rychlost %@ · CPU %.0f %%%@",
-            mark, lvl.label, Verdict.cause(s), Pressure.name(s.pressure), speed,
+            format: "%@ %@ — %@ · tlak %@%@ · rychlost %@ · CPU %.0f %%%@",
+            mark, lvl.label, Verdict.cause(s), Pressure.name(s.pressure), temp, speed,
             Verdict.busy(s), extra
         )
     }

@@ -6,16 +6,27 @@ jakéhokoli modelu — je to obyčejný Swift binárník, takže nespotřebováv
 kredity. Jediné síťové volání v celém kódu je volitelný POST na ntfy při alertu
 (`src/Alerter.swift`, `sendRemote`).
 
-V liště je to tichá tečka s procentem a mini grafem trendu za posledních 30 minut
-(výška sloupce = tepelný tlak, barva = stav), takže je vidět i pík po náročné
-operaci a jeho pozvolný pokles. Hlasité je to jen tehdy, když systém opravdu
-omezuje výkon.
+V liště jsou dvojice **hodnota + grafík** za posledních 30 minut, takže je vidět
+i pík po náročné operaci a jeho pozvolný pokles:
+
+```
+● 95 %  ▁▅█   45° ▁▂▃   18 % ▂▅▃   65 % ▄▄▄   ↓9k ▁▂▁
+  rychlost     teplota    CPU       paměť      síť
+```
+
+Každý blok se zapíná zvlášť v menu (*V liště: …*). Hlasité je to jen tehdy, když
+systém opravdu omezuje výkon.
 
 ## Co to stojí
 
-**Změřeno, ne odhadnuto:** 0,50 s CPU za 150 s běhu = **0,33 % jednoho jádra**,
-0,033 % desetijádrového stroje; 55 MB RSS; `ps` hlásí 0,0 %. Měřeno včetně startu
-(úklid logu, agregace, výpočet reference), v ustáleném běhu je to méně.
+**Změřeno, ne odhadnuto:** se všemi pěti bloky 0,61 s CPU za 150 s běhu =
+**0,41 % jednoho jádra**, 0,04 % desetijádrového stroje; 58 MB RSS; `ps` hlásí 0,0 %.
+
+Jeden odečet stojí (změřeno, 20 opakování): teplota 18 ms, síť 0,08 ms, tepelný
+tlak 0,03 ms, paměť i vytížení CPU pod 0,01 ms. Teplota je tedy jediná drahá věc —
+je to IPC na každé čidlo — proto se čte **nejvýš ze šesti čidel a jednou za 15 s**
+(`Sensors.maxSensors`, `Sensors.refresh`). Bez toho stála sama 0,36 % jádra a
+celek vyskočil na 1,20 %.
 
 Z čeho ta spotřeba je:
 
@@ -52,6 +63,22 @@ Slepé uličky, všechny ověřené spuštěním na tomhle M5:
 | `sysctl -a \| grep -i thermal` | nic |
 | `powermetrics -s smc,thermal` | `must be invoked as the superuser` |
 | `ioreg -c AppleSMC` | `AppleARMPMUTempSensor` teplotu v properties nevystavuje |
+
+## Teplota, paměť, síť
+
+Všechno tři jde bez roota (`src/Sensors.swift`):
+
+* **Teplota** přes **privátní** `IOHIDEventSystem` — čidla se hlásí jako HID služby
+  s `PrimaryUsagePage 0xff00`, `PrimaryUsage 5`. Na tomhle M5 jich je 44; berou se
+  jen `tdie` (teploty křemíku) a z nich maximum. Dokumentované cesty teplotu
+  nedávají, viz tabulka výše. Protože je to privátní API, může ho příští macOS beze
+  slova změnit — proto je hodnota volitelná a verdikt na ní nestojí. **Přesnost ber
+  s rezervou:** nedokumentovaná čidla nemusí souhlasit s komerčními nástroji,
+  spolehlivý je trend, ne absolutní číslo.
+* **Paměť** z `host_statistics64(HOST_VM_INFO64)` jako v Monitoru aktivity:
+  aktivní + wired + komprimovaná.
+* **Síť** z `getifaddrs`, rozdíl čítačů `ifi_ibytes`/`ifi_obytes` mezi vzorky,
+  bez `lo`. Graf je logaritmický, 1 kB/s až 10 MB/s.
 
 ## Druhá metrika: o kolik jsi pomalejší
 
@@ -140,7 +167,11 @@ launchctl kickstart -k "gui/$(id -u)/cz.filipburda.thermalwatch"
 | `sound` | `true` | zvuk k alertu |
 | `cooldownSeconds` | `600` | minimální odstup mezi alerty |
 | `alertOnModerate` | `false` | upozorňovat už na `Moderate` |
-| `menuBarChart` | `true` | mini graf trendu v liště |
+| `blockSpeed` | `true` | blok v liště: rychlost |
+| `blockHeat` | `true` | blok v liště: teplota |
+| `blockCpu` | `true` | blok v liště: vytížení CPU |
+| `blockMem` | `false` | blok v liště: paměť |
+| `blockNet` | `false` | blok v liště: síť |
 
 ## Data
 
@@ -156,7 +187,8 @@ Do repozitářů, se kterými pracuješ, nástroj nezapisuje nic.
 
 ## Hranice
 
-* Teplota ve stupních ne — bez `sudo` není odkud.
+* Teplota je z nedokumentovaného API — může zmizet s novou verzí macOS a absolutní
+  hodnota nemusí sedět. Verdikt proto drží tepelný tlak, ne stupně.
 * GPU throttling se neměří, jen CPU.
 * Prvních ~30 s po startu je okno pro vyhlazení neúplné.
 * Statistika potřebuje nasbíraná data; `--stats` má smysl až po pár dnech běhu.

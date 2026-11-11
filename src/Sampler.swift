@@ -26,6 +26,13 @@ struct Sample: Codable {
     /// (minutový průměr, reaguje pomalu) zachytí i krátký souboj o jádra, který
     /// sráží měřenou rychlost. Volitelné kvůli starším záznamům.
     let cpu: Double?
+    /// Nejteplejší místo křemíku ve °C (privátní IOHID, viz `Sensors`).
+    let tempC: Double?
+    /// Obsazená paměť v procentech.
+    let mem: Double?
+    /// Propustnost sítě v kB/s od minulého vzorku.
+    let netIn: Double?
+    let netOut: Double?
     let lowPower: Bool   // Low Power Mode
     let onAC: Bool       // na napájení ze sítě
     /// Měřeno z agenta na pozadí (true) nebo z jednorázového CLI běhu (false).
@@ -118,8 +125,9 @@ enum Verdict {
                 j -= 1; used += 1
             }
             out.append(Sample(t: s.t, pressure: pressure, thermal: thermal, speedPct: pct,
-                              nanos: s.nanos, load1: s.load1, cpu: s.cpu, lowPower: s.lowPower,
-                              onAC: s.onAC, gui: s.gui, top: s.top))
+                              nanos: s.nanos, load1: s.load1, cpu: s.cpu, tempC: s.tempC,
+                              mem: s.mem, netIn: s.netIn, netOut: s.netOut,
+                              lowPower: s.lowPower, onAC: s.onAC, gui: s.gui, top: s.top))
         }
         return out
     }
@@ -301,6 +309,9 @@ struct Sampler {
         // Číst se musí vždycky, i když se rychlost neměří – jinak by příští rozdíl
         // tiků pokrýval několik vzorků a hlásil průměr, ne okamžik.
         let cpu = cpuBusyPct()
+        let temp = Sensors.temperature()
+        let mem = Sensors.memoryUsedPct()
+        let net = Sensors.network()
 
         var n: UInt64?
         var pct: Double?
@@ -332,6 +343,10 @@ struct Sampler {
             nanos: n,
             load1: load,
             cpu: cpu,
+            tempC: temp,
+            mem: mem,
+            netIn: net?.inKBs,
+            netOut: net?.outKBs,
             lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled,
             onAC: onACPower(),
             gui: isGUI,

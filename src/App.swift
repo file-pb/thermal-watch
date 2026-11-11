@@ -5,11 +5,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var baseline: UInt64 = 0
     private var samples: [Sample] = []
+    private var lastSpeed: Double?
 
     private let alerter = Alerter()
     private var config = Config.load()
     private let chart = ChartView(frame: NSRect(x: 0, y: 0, width: 340, height: 118))
     private let headline = NSMenuItem(title: "…", action: nil, keyEquivalent: "")
+    private let sensors = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private var blockItems: [String: NSMenuItem] = [:]
     private let detail = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let summary = NSMenuItem(title: "", action: nil, keyEquivalent: "")
 
@@ -57,6 +60,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(summary)
         menu.addItem(.separator())
+        menu.addItem(sensors)
+        menu.addItem(.separator())
+        for (title, key) in [("V liště: rychlost", "speed"),
+                             ("V liště: teplota", "heat"),
+                             ("V liště: CPU", "cpu"),
+                             ("V liště: paměť", "mem"),
+                             ("V liště: síť", "net")] {
+            let item = NSMenuItem(title: title, action: #selector(toggleBlock(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = key
+            blockItems[key] = item
+            menu.addItem(item)
+        }
+        syncBlockStates()
         let who = NSMenuItem(title: "Co mě teď hřeje…", action: #selector(showWho), keyEquivalent: "")
         who.target = self
         menu.addItem(who)
@@ -120,18 +137,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func render(_ raw: Sample) {
         let smooth = Verdict.smoothSeries(samples)
         let s = smooth.last ?? raw
-        let lvl = Verdict.overall(s)
-        // Bez změřené rychlosti zůstane v liště jen tečka – stav z tepelného tlaku.
-        let suffix = s.speedPct.map { " \(Int($0.rounded())) %" } ?? ""
-        let title = NSMutableAttributedString(
-            string: "●" + suffix,
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
-                .foregroundColor: NSColor.labelColor,
-            ])
-        title.addAttribute(.foregroundColor, value: ChartView.colors[lvl.rawValue],
-                           range: NSRange(location: 0, length: 1))
-        statusItem.button?.attributedTitle = title
+        // Rychlost se měří jednou za minutu, takže většina vzorků ji nemá. Drží se
+        // proto poslední známá hodnota – jinak by číslo v liště každou minutu
+        // probliklo a zase zmizelo.
+        if let fresh = samples.last(where: { $0.speedPct != nil }),
+           Date().timeIntervalSince1970 - fresh.t < 5 * 60 {
+            lastSpeed = fresh.speedPct
+        }
+        statusItem.button?.title = ""
+        statusItem.button?.image = AppDelegate.menuBarImage(smooth, config: config, speed: lastSpeed)
 
         headline.title = Report.statusLine(s)
         let measured = raw.nanos.map {
@@ -141,9 +155,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         detail.title = "tlak \(Pressure.name(raw.pressure)) · \(measured)"
             + (raw.lowPower ? " · Low Power Mode" : "")
 
+        var bits: [String] = [String(format: "CPU %.0f %%", Verdict.busy(raw))]
+        if let m = raw.mem { bits.append(String(format: "RAM %.0f %%", m)) }
+        if let t = raw.tempC { bits.append(String(format: "%.0f °C", t)) }
+        if let i = raw.netIn, let o = raw.netOut {
+            func fmt(_ v: Double) -> String {
+                v >= 1024 ? String(format: "%.1f MB/s", v / 1024) : String(format: "%.0f kB/s", v)
+            }
+            bits.append("↓ \(fmt(i))  ↑ \(fmt(o))")
+        }
+        sensors.title = bits.joined(separator: "  ·  ")
+
         chart.samples = smooth
         chart.needsDisplay = true
-        statusItem.button?.image = config.menuBarChart ? AppDelegate.trendImage(smooth) : nil
 
         if smooth.isEmpty {
             summary.title = ""
@@ -162,40 +186,172 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
-    /// Mini graf trendu do lišty: výška = tepelný tlak, barva = stav v tu chvíli.
-    /// Po náročné operaci je vidět pík a jeho pozvolný pokles.
-    static func trendImage(_ samples: [Sample], width: CGFloat = 46, height: CGFloat = 13) -> NSImage {
+    /// Jeden sloupec mini grafu: hodnota 0–1, volitelná druhá série a barva.
+    private struct Col {
+        var v: CGFloat
+        var v2: CGFloat?
+        var color: NSColor
+    }
+
+    /// Blok v liště = hodnota a hned za ní její grafík.
+    private struct Block {
+        let label: String
+        let dot: NSColor?
+        let cols: [Col?]
+    }
+
+    private static let graphWidth: CGFloat = 26
+    private static let barWidth: CGFloat = 2
+    private static let blockGap: CGFloat = 7
+    private static let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+
+    private static func columns(_ samples: [Sample],
+                                value: (Sample) -> (CGFloat, CGFloat?, NSColor)?) -> [Col?] {
+        let count = Int(graphWidth / barWidth)
+        var out = [Col?](repeating: nil, count: count)
+        let window: Double = 30 * 60
+        let now = Date().timeIntervalSince1970
+        for s in samples {
+            let age = now - s.t
+            guard age >= 0, age <= window, let (v, v2, c) = value(s) else { continue }
+            let i = min(count - 1, Int((1 - age / window) * Double(count)))
+            if out[i] == nil || v > out[i]!.v { out[i] = Col(v: v, v2: v2, color: c) }
+        }
+        return out
+    }
+
+    private static func blocks(_ samples: [Sample], config: Config,
+                               speed: Double?) -> [Block] {
+        var out: [Block] = []
+        let last = samples.last
+
+        if config.blockSpeed {
+            let sev = last.map { Verdict.overall($0) } ?? .ok
+            out.append(Block(
+                label: speed.map { "\(Int($0.rounded())) %" } ?? "–",
+                dot: ChartView.colors[sev.rawValue],
+                cols: columns(samples) { s in
+                    guard let p = s.speedPct else { return nil }
+                    // 50–110 % na celou výšku
+                    return (CGFloat((p - 50) / 60), nil, ChartView.colors[Verdict.overall(s).rawValue])
+                }))
+        }
+        if config.blockHeat {
+            out.append(Block(
+                label: last?.tempC.map { String(format: "%.0f°", $0) } ?? "–",
+                dot: nil,
+                cols: columns(samples) { s in
+                    let color = ChartView.colors[Verdict.pressureLevel(s.pressure).rawValue]
+                    guard let t = s.tempC else {
+                        return (max(0.08, CGFloat(s.pressure ?? 0) / 3), nil, color)
+                    }
+                    return (CGFloat((t - 35) / 60), nil, color)   // 35–95 °C
+                }))
+        }
+        if config.blockCpu {
+            out.append(Block(
+                label: last.map { String(format: "%.0f %%", Verdict.busy($0)) } ?? "–",
+                dot: nil,
+                cols: columns(samples) { (CGFloat(Verdict.busy($0) / 100), nil, .systemBlue) }))
+        }
+        if config.blockMem {
+            out.append(Block(
+                label: last?.mem.map { String(format: "%.0f %%", $0) } ?? "–",
+                dot: nil,
+                cols: columns(samples) { s in
+                    s.mem.map { (CGFloat($0 / 100), nil, NSColor.systemPurple) }
+                }))
+        }
+        if config.blockNet {
+            // Logaritmicky: 1 kB/s až 10 MB/s se vejde do třinácti bodů výšky.
+            func scale(_ v: Double) -> CGFloat { v > 1 ? CGFloat(min(1, log10(v) / 4)) : 0 }
+            func short(_ v: Double) -> String {
+                v >= 1024 ? String(format: "%.1fM", v / 1024) : String(format: "%.0fk", v)
+            }
+            out.append(Block(
+                label: last.flatMap { $0.netIn.map { i in "↓" + short(i) } } ?? "–",
+                dot: nil,
+                cols: columns(samples) { s in
+                    guard let i = s.netIn, let o = s.netOut else { return nil }
+                    return (scale(i), scale(o), NSColor.systemTeal)
+                }))
+        }
+        return out
+    }
+
+    /// Celá lišta jako jeden obrázek: dvojice „hodnota + grafík“ vedle sebe.
+    /// Kreslí se to ručně, protože `NSStatusItem` umí jen jeden text a jeden
+    /// obrázek – prokládat je jinak nejde.
+    static func menuBarImage(_ samples: [Sample], config: Config,
+                             speed: Double?, height: CGFloat = 18) -> NSImage? {
+        let bl = blocks(samples, config: config, speed: speed)
+        guard !bl.isEmpty else { return nil }
+
+        let attrs: [NSAttributedString.Key: Any] = [.font: labelFont]
+        func labelWidth(_ b: Block) -> CGFloat {
+            (b.label as NSString).size(withAttributes: attrs).width.rounded(.up)
+                + (b.dot == nil ? 0 : 12)
+        }
+        let width = bl.reduce(0) { $0 + labelWidth($1) + 3 + graphWidth }
+            + CGFloat(bl.count - 1) * blockGap
+
         let img = NSImage(size: NSSize(width: width, height: height))
         img.lockFocus()
         defer { img.unlockFocus() }
 
-        // Základní linka, ať je i „všechno v pořádku“ vidět jako stav, ne jako prázdno.
-        NSColor.tertiaryLabelColor.setFill()
-        NSRect(x: 0, y: 0, width: width, height: 1).fill()
+        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance {
+            var x: CGFloat = 0
+            let textY = (height - labelFont.capHeight) / 2 - labelFont.descender / 2 - 4
+            for b in bl {
+                if let dot = b.dot {
+                    dot.setFill()
+                    NSBezierPath(ovalIn: NSRect(x: x, y: height / 2 - 3.5, width: 7, height: 7)).fill()
+                    x += 12
+                }
+                (b.label as NSString).draw(
+                    at: NSPoint(x: x, y: textY),
+                    withAttributes: [.font: labelFont, .foregroundColor: NSColor.labelColor])
+                x += (b.label as NSString).size(withAttributes: attrs).width.rounded(.up) + 3
 
-        guard !samples.isEmpty else { return img }
-        let window: Double = 30 * 60
-        let now = Date().timeIntervalSince1970
-        let bar: CGFloat = 2                 // souvislý pás, bez mezer: v liště se čte líp
-        let cols = Int(width / bar)
-        var bucket = [Int?](repeating: nil, count: cols)
-        var sev = [Int](repeating: 0, count: cols)
-        for s in samples {
-            let age = now - s.t
-            guard age >= 0, age <= window else { continue }
-            let i = min(cols - 1, Int((1 - age / window) * Double(cols)))
-            let p = s.pressure ?? 0
-            if bucket[i] == nil || p > bucket[i]! { bucket[i] = p }
-            sev[i] = max(sev[i], Verdict.overall(s).rawValue)
-        }
-        for (i, p) in bucket.enumerated() {
-            guard let p else { continue }
-            // 0 = jen nub nad linkou, pak po stupních tlaku až po plnou výšku
-            let h = max(2, min(height, CGFloat(p) * (height - 2) / 3 + 2))
-            ChartView.colors[sev[i]].withAlphaComponent(p == 0 ? 0.55 : 0.95).setFill()
-            NSRect(x: CGFloat(i) * bar, y: 0, width: bar, height: h).fill()
+                NSColor.tertiaryLabelColor.setFill()
+                NSRect(x: x, y: 2, width: graphWidth, height: 1).fill()
+                for (i, col) in b.cols.enumerated() {
+                    guard let col else { continue }
+                    let h = max(1, min(height - 4, col.v * (height - 5) + 1))
+                    col.color.withAlphaComponent(0.9).setFill()
+                    NSRect(x: x + CGFloat(i) * barWidth, y: 2, width: barWidth, height: h).fill()
+                    if let v2 = col.v2 {
+                        let y = 2 + max(1, min(height - 4, v2 * (height - 5) + 1))
+                        col.color.blended(withFraction: 0.5, of: .labelColor)?.setFill()
+                        NSRect(x: x + CGFloat(i) * barWidth, y: y, width: barWidth, height: 1).fill()
+                    }
+                }
+                x += graphWidth + blockGap
+            }
         }
         return img
+    }
+
+    private func syncBlockStates() {
+        blockItems["speed"]?.state = config.blockSpeed ? .on : .off
+        blockItems["heat"]?.state = config.blockHeat ? .on : .off
+        blockItems["cpu"]?.state = config.blockCpu ? .on : .off
+        blockItems["mem"]?.state = config.blockMem ? .on : .off
+        blockItems["net"]?.state = config.blockNet ? .on : .off
+    }
+
+    @objc private func toggleBlock(_ sender: NSMenuItem) {
+        switch sender.representedObject as? String {
+        case "speed": config.blockSpeed.toggle()
+        case "heat": config.blockHeat.toggle()
+        case "cpu": config.blockCpu.toggle()
+        case "mem": config.blockMem.toggle()
+        case "net": config.blockNet.toggle()
+        default: return
+        }
+        config.save()
+        syncBlockStates()
+        tick()
     }
 
     @objc private func showWho() {
