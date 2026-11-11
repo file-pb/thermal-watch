@@ -65,20 +65,30 @@ final class ChartView: NSView {
         }
 
         // Souvislé úseky: mezera delší než maxGap (aplikace neběžela) se nespojuje,
-        // jinak by chybějící data vypadala jako pozvolný propad.
-        let maxGap: Double = 20
+        // jinak by chybějící data vypadala jako pozvolný propad. Mez se odvozuje od
+        // intervalu měření rychlosti (Sampler.speedIntervalIdle), ne od intervalu
+        // vzorkování – rychlost se měří jednou za minutu, takže pevných 20 s by
+        // rozsekalo každý bod do vlastní řady a nenakreslilo by se nic.
+        let maxGap: Double = Sampler.speedIntervalIdle * 2.5
+        // Nejdřív vybrat jen změřené vzorky. Neměřený vzorek řadu přerušit nesmí:
+        // vzorkuje se po 5 s, ale rychlost se měří po 60 s, takže by každý bod
+        // skončil ve vlastní jednoprvkové řadě a graf by zůstal prázdný.
+        let measured = samples.filter { $0.speedPct != nil }
         var runs: [[Sample]] = []
         var run: [Sample] = []
-        for s in samples {
-            // Neměřený vzorek řadu přeruší – kreslit se dá jen to, co se změřilo.
-            guard s.speedPct != nil else {
-                if !run.isEmpty { runs.append(run); run = [] }
-                continue
-            }
+        for s in measured {
             if let last = run.last, s.t - last.t > maxGap { runs.append(run); run = [] }
             run.append(s)
         }
         if !run.isEmpty { runs.append(run) }
+
+        // Osamocený bod (po restartu, po delší mezeře) by jako úsečka zmizel.
+        for r in runs where r.count == 1 {
+            let s0 = r[0]
+            let d = NSRect(x: xFor(s0.t) - 2, y: yFor(s0.speedPct ?? 100) - 2, width: 4, height: 4)
+            ChartView.colors[Verdict.overall(s0).rawValue].setFill()
+            NSBezierPath(ovalIn: d).fill()
+        }
 
         for r in runs where r.count >= 2 {
             // plocha pod křivkou
